@@ -1,0 +1,46 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "pm2 start ecosystem.config.cjs --env production",
+    "start:dev": "pm2 start ecosystem.config.cjs --env development",
+    "stop": "pm2 stop sak-soti-backend",
+    "restart": "pm2 restart sak-soti-backend",
+    "reload": "pm2 reload sak-soti-backend",
+    "delete": "pm2 delete sak-soti-backend",
+    "logs": "pm2 logs sak-soti-backend",
+    "monit": "pm2 monit",
+    "status": "pm2 status",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "axios": "^1.13.1",
+    "bcryptjs": "^3.0.2",
+    "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "firebase-admin": "^13.5.0",
+    "ioredis": "^5.8.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongodb": "^6.20.0",
+    "mongoose": "^8.19.1",
+    "multer": "^2.0.2",
+    "redis": "^5.8.3",
+    "sanitize-html": "^2.17.0",
+    "socket.io": "^4.8.1",
+    "stripe": "^17.3.1",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10",
+    "pm2": "^6.0.13"
+  }
+}
