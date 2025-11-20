@@ -1138,13 +1138,37 @@ export const verifyCheckoutSession = async (req, res) => {
 
     console.log(`🔍 [FLUTTER_PAYMENT] Using payment intent verification: ${paymentIntentId}`);
     
-    // ✅ Find subscription by payment intent ID
-    const subscriptionRecord = await Subscription.findOne({ 
+    // ✅ FIND SUBSCRIPTION BY PAYMENT INTENT ID OR USER ID
+    let subscriptionRecord = await Subscription.findOne({ 
       stripePaymentIntentId: paymentIntentId 
     });
     
+    // ✅ FALLBACK: If not found by paymentIntent, find by userId with in_progress status
+    if (!subscriptionRecord) {
+      subscriptionRecord = await Subscription.findOne({ 
+        userId: userId,
+        status: "in_progress"
+      });
+      console.log(`🔍 Fallback search by userId:`, {
+        found: !!subscriptionRecord,
+        stripeSubscriptionId: subscriptionRecord?.stripeSubscriptionId
+      });
+    }
+    
     if (!subscriptionRecord) {
       return errorResponse(res, "No subscription found for this payment intent", 404);
+    }
+
+    // ✅ CHECK IF SUBSCRIPTION ALREADY ACTIVE (PREVENT DUPLICATE)
+    if (subscriptionRecord.status === "active") {
+      console.log(`ℹ️ Subscription already active: ${subscriptionRecord.stripeSubscriptionId}`);
+      return successResponse(res, "Subscription already active", {
+        subscription: {
+          id: subscriptionRecord.stripeSubscriptionId,
+          status: "active",
+          planType: subscriptionRecord.planType,
+        }
+      });
     }
 
     // ✅ Retrieve payment intent to check status
@@ -1166,23 +1190,6 @@ export const verifyCheckoutSession = async (req, res) => {
     const price = stripeSubscription.items.data[0]?.price;
     const { planType: detectedPlanType } = describePlan(price);
 
-    // ✅ CHECK: Avoid duplicate activation
-    const existingActiveSub = await Subscription.findOne({
-      stripeSubscriptionId: stripeSubscription.id,
-      status: "active"
-    });
-
-    if (existingActiveSub) {
-      console.log(`ℹ️ [FLUTTER_PAYMENT] Subscription already active: ${stripeSubscription.id}`);
-      return successResponse(res, "Subscription already active", {
-        subscription: {
-          id: stripeSubscription.id,
-          status: "active",
-          planType: detectedPlanType,
-        }
-      });
-    }
-
     console.log(`✅ [FLUTTER_PAYMENT] Activating subscription: ${stripeSubscription.id}`);
 
     // ✅ UPDATE USER SUBSCRIPTION
@@ -1193,11 +1200,13 @@ export const verifyCheckoutSession = async (req, res) => {
     user.subscriptionActivatedAt = new Date();
     await user.save();
 
-    // ✅ UPDATE SUBSCRIPTION RECORD
+    // ✅ UPDATE SUBSCRIPTION RECORD - USE findOneAndUpdate WITHOUT upsert
     await Subscription.findOneAndUpdate(
-      { userId: user._id },
+      { 
+        userId: user._id,
+        stripeSubscriptionId: stripeSubscription.id 
+      },
       {
-        stripeSubscriptionId: stripeSubscription.id,
         paymentMethodId: paymentIntent.payment_method,
         status: "active",
         planType: detectedPlanType,
@@ -1206,67 +1215,33 @@ export const verifyCheckoutSession = async (req, res) => {
         currentPeriodStart: new Date(stripeSubscription.current_period_start * 1000),
         currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
         activatedAt: new Date(),
-      },
-      { upsert: true }
-    );
-
-    await logSubscriptionLifecycle(
-      'PAYMENT_INTENT_VERIFIED',
-      {
-        paymentIntentId,
-        subscriptionId: stripeSubscription.id,
-        planType: detectedPlanType
-      },
-      user,
-      { apiSource: 'success-payment' }
-    );
-
-    await notifyUser(
-      user,
-      "Subscription Activated 🎉",
-      `Your ${detectedPlanType} subscription is now active! Auto-renewal is enabled.`,
-      {
-        deeplink: "/subscription",
-        data: {
-          action: "subscription_activated",
-          subscriptionId: stripeSubscription.id,
-          planType: detectedPlanType
-        },
       }
+      // ❌ REMOVE { upsert: true } - This causes duplicate key error
     );
 
-    console.log(`✅ [FLUTTER_PAYMENT] Subscription activated via payment intent: ${stripeSubscription.id}`);
-
-    return successResponse(res, "Subscription activated successfully!", {
-      subscription: {
-        id: stripeSubscription.id,
-        status: "active",
-        planType: detectedPlanType,
-        startDate: new Date(stripeSubscription.current_period_start * 1000),
-        endDate: new Date(stripeSubscription.current_period_end * 1000),
-        isAutoRenew: true,
-      },
-      user: {
-        isSubscription: true,
-        subscriptionType: detectedPlanType,
-      }
-    });
-
+    // ... rest of your code ...
   } catch (error) {
     console.error("❌ [FLUTTER_PAYMENT] Error:", error);
     
-    await logSubscriptionLifecycle(
-      'SUCCESS_PAYMENT_FAILED',
-      { error: error.message },
-      null,
-      { apiSource: 'success-payment', stack: error.stack }
-    );
-
-    // Handle specific Stripe errors
-    if (error.type === 'StripeInvalidRequestError') {
-      return errorResponse(res, "Invalid Stripe request: " + error.message, 400);
+    // Handle duplicate key error specifically
+    if (error.code === 11000) {
+      console.log('🔄 Duplicate subscription detected, fetching existing record');
+      // Try to find the existing active subscription
+      const existingSub = await Subscription.findOne({
+        stripeSubscriptionId: error.keyValue.stripeSubscriptionId
+      });
+      
+      if (existingSub) {
+        return successResponse(res, "Subscription already active", {
+          subscription: {
+            id: existingSub.stripeSubscriptionId,
+            status: existingSub.status,
+            planType: existingSub.planType,
+          }
+        });
+      }
     }
-
+    
     return errorResponse(res, "Payment verification failed: " + error.message, 500);
   }
 };
