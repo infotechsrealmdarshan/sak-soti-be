@@ -13,7 +13,7 @@ import newsRoutes from "./routes/newsRoutes.js";
 import postRoutes from "./routes/postRoutes.js";
 import chatRoutes from "./routes/chatRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
-import { checkExpiredSubscriptions } from "./utils/subscriptionCron.js";
+// import { checkExpiredSubscriptions } from "./utils/subscriptionCron.js";
 import policyRoutes from "./routes/policyRoutes.js"
 import termRoutes from "./routes/termRoutes.js"
 import contactRoutes from "./routes/contactRoutes.js"
@@ -35,13 +35,9 @@ app.use(cors(corsOptions));
 // Note: Stripe webhook requires raw body for signature verification.
 // We mount the webhook route with express.raw BEFORE express.json.
 
-app.use(
+app.post(
   "/api/subscription/webhook",
   express.raw({ type: "application/json" }),
-  (req, res, next) => {
-    req.rawBody = req.body;
-    next();
-  },
   stripeWebhook
 );
 
@@ -99,12 +95,12 @@ app.use("/api/notification", notificationRoutes);
 app.use("/api/subscription", stripeRoutes);
 
 // ✅ Subscription cron (disabled on Vercel)
-if (process.env.VERCEL !== "1") {
-  setInterval(async () => {
-    await checkExpiredSubscriptions();
-  }, 15 * 60 * 1000);
-  checkExpiredSubscriptions().catch(console.error);
-}
+// if (process.env.VERCEL !== "1") {
+//   setInterval(async () => {
+//     await checkExpiredSubscriptions();
+//   }, 15 * 60 * 1000);
+//   checkExpiredSubscriptions().catch(console.error);
+// }
 
 // ✅ Global error handler
 app.use(globalErrorHandler);

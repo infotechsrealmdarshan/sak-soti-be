@@ -26,15 +26,10 @@ export const initializeSocket = (server) => {
       }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const user = await User.findById(decoded.id).select("_id isDeleted");
+      const user = await User.findById(decoded.id).select("_id");
 
       if (!user) {
         return next(new Error("Authentication error: User not found"));
-      }
-
-      // ✅ Check if user account is deleted
-      if (user.isDeleted === true) {
-        return next(new Error("This account has been deleted. Please contact support team to restore your account."));
       }
 
       socket.userId = decoded.id;
@@ -51,21 +46,28 @@ export const initializeSocket = (server) => {
     // Join room for user ID to receive messages
     socket.join(`user:${userId}`);
 
-    // Handle chat room subscription for real-time notifications
-    // For GET /api/chat/{chatId} - Client should emit "joinChat" with chatId to subscribe
-    // Client should then listen for "newMessage" event to receive new messages
-    socket.on("joinChat", (chatId) => {
+    socket.on("joinChat", (data) => {
+      console.log("🎯 Backend received joinChat with data:", data);
+
+      // Handle both object and direct parameter
+      const chatId = typeof data === 'object' ? data.chatId : data;
+
       if (!chatId || !mongoose.Types.ObjectId.isValid(chatId)) {
+        console.log("❌ Invalid chat ID:", chatId);
         return socket.emit('error', { message: 'Invalid chat ID' });
       }
+
       socket.join(`chat:${chatId}`);
+      console.log(`✅ User ${userId} joined chat room: chat:${chatId}`);
+
+      // Verify room joining
+      console.log(`🏠 User ${userId} rooms after join:`, Array.from(socket.rooms));
     });
 
     // Handle leaving chat room
     socket.on("leaveChat", (chatId) => {
       if (chatId) {
         socket.leave(`chat:${chatId}`);
-        console.log(`leave id: ${chatId}`);
         console.log(`👤 User ${userId} left chat room: chat:${chatId}`);
       }
     });

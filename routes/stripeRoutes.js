@@ -3,12 +3,13 @@ import express from "express";
 import auth from "../middlewares/auth.js";
 import {
   getPlans,
-  createSubscription,
   stripeWebhook,
   getUserSubscriptions,
   getAllSubscriptionsAdmin,
   cancelSubscription,
   getSubscriptionById,
+  selectPlan,
+  getPaymentMethodFromIntent,
 } from "../controller/stripeController.js";
 import { adminOnly } from "../middlewares/role.js";
 
@@ -35,31 +36,74 @@ router.get("/plans", getPlans);
 
 /**
  * @swagger
- * /api/subscription/create:
+ * /api/subscription/select-plan:
  *   post:
  *     tags: [Subscription]
- *     summary: Create a new subscription
- *     description: Creates a subscription for the logged-in user.
+ *     summary: Step 1 - Select subscription plan
  *     security:
  *       - bearerAuth: []
  *     requestBody:
- *       required: false
+ *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required:
+ *               - planType
  *             properties:
  *               planType:
  *                 type: string
- *                 enum: [monthly, yearly]
- *               paymentMethodId:
+ *                 enum: [monthly, yearly, testing]
+ *                 description: Type of subscription plan
+ *                 example: monthly
+ *               priceId:
  *                 type: string
- *                 example: pm_1SSxkvDzEd1MwuqijKGVnBH2
+ *                 description: Direct Stripe price ID (alternative to planType)
+ *                 example: price_1XYZabc123def
  *     responses:
  *       200:
- *         description: Subscription created successfully
+ *         description: Plan selected successfully. SetupIntent created for payment method collection.
+ *       400:
+ *         description: Bad request - missing planType or user already has subscription
+ *       404:
+ *         description: User not found or plan not found
+ *       500:
+ *         description: Internal server error
  */
-router.post("/create", auth, createSubscription);
+router.post("/select-plan", auth, selectPlan);
+
+/**
+ * @swagger
+ * /api/subscription/success-payment:
+ *   post:
+ *     tags: [Subscription]
+ *     summary: Get payment method details from payment intent ID
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - paymentIntentId
+ *             properties:
+ *               paymentIntentId:
+ *                 type: string
+ *                 description: Payment Intent ID
+ *                 example: pi_3MtwBwLkdIwHu7ix28a3tqPa
+ *     responses:
+ *       200:
+ *         description: Payment method details retrieved successfully
+ *       400:
+ *         description: Bad request - missing paymentIntentId
+ *       404:
+ *         description: Payment intent not found or no payment method
+ *       500:
+ *         description: Internal server error
+ */
+router.post("/success-payment", auth, getPaymentMethodFromIntent);
 
 /**
  * @swagger
@@ -67,7 +111,6 @@ router.post("/create", auth, createSubscription);
  *   post:
  *     tags: [Subscription]
  *     summary: Stripe Webhook
- *     description: Handles Stripe events (public endpoint).
  *     requestBody:
  *       required: true
  *       content:
@@ -94,7 +137,6 @@ router.post(
  *   get:
  *     tags: [Subscription]
  *     summary: Get current or all user subscriptions
- *     description: Fetch either the current active subscription or all past subscriptions directly from Stripe for the logged-in user.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -117,7 +159,6 @@ router.get("/list", auth, getUserSubscriptions);
  *   get:
  *     tags: [Subscription]
  *     summary: Get all subscriptions (admin)
- *     description: Returns detailed subscription records enriched with Stripe invoice and payment method data.
  *     security:
  *       - bearerAuth: []
  *     responses:
@@ -125,38 +166,6 @@ router.get("/list", auth, getUserSubscriptions);
  *         description: Subscriptions fetched successfully
  *       403:
  *         description: Admin access required
- *     parameters:
- *       - in: query
- *         name: page
- *         schema:
- *           type: integer
- *           default: 1
- *         description: Page number (1-based)
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           default: 10
- *         description: Number of items per page
- *       - in: query
- *         name: search
- *         schema:
- *           type: string
- *         description: Search by subscription id, customer id, status, plan type, or user name/email
- *       - in: query
- *         name: orderBy
- *         schema:
- *           type: string
- *           enum: [createdAt, updatedAt, status, planType, amount, startDate, endDate, customer, subscription, user]
- *           default: createdAt
- *         description: Field to sort by
- *       - in: query
- *         name: order
- *         schema:
- *           type: string
- *           enum: [asc, desc]
- *           default: desc
- *         description: Sort direction
  */
 router.get("/admin/list", auth, adminOnly, getAllSubscriptionsAdmin);
 
@@ -166,7 +175,6 @@ router.get("/admin/list", auth, adminOnly, getAllSubscriptionsAdmin);
  *   get:
  *     tags: [Subscription]
  *     summary: Get any subscription by ID (Admin only)
- *     description: Fetch detailed information about any subscription by ID. Admin access required.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -208,6 +216,5 @@ router.get("/admin/:subscriptionId", auth, adminOnly, getSubscriptionById);
  *         description: Error canceling subscription
  */
 router.delete("/cancel", auth, cancelSubscription);
-
 
 export default router;

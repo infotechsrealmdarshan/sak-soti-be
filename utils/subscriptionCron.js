@@ -68,3 +68,46 @@ export const checkExpiredSubscriptions = async () => {
   }
 };
 
+export const checkAndExpireSubscription = async (user) => {
+  if (!user.isSubscription || !user.subscriptionEndDate) {
+    return { expired: false, user };
+  }
+
+  const now = new Date();
+  
+  // If subscription end date has passed, expire the subscription
+  if (user.subscriptionEndDate < now) {
+    console.log(`🔄 Auto-expiring subscription for user: ${user.email}`);
+    
+    // Set lastSubscriptionDate to the expired end date
+    if (user.subscriptionEndDate) {
+      user.lastSubscriptionDate = user.subscriptionEndDate;
+    }
+
+    // Clear subscription fields
+    user.isSubscription = false;
+    user.subscriptionType = null;
+    user.subscriptionStartDate = null;
+    user.subscriptionEndDate = null;
+
+    await user.save();
+
+    // Update subscription record
+    try {
+      await Subscription.findOneAndUpdate(
+        { userId: user._id, status: { $in: ['active', 'trialing'] } },
+        { 
+          status: 'expired',
+          endDate: now 
+        }
+      );
+      console.log(`✅ Subscription record updated to expired for user: ${user.email}`);
+    } catch (subError) {
+      console.warn(`⚠️ Could not update subscription record: ${subError.message}`);
+    }
+
+    return { expired: true, user };
+  }
+
+  return { expired: false, user };
+};

@@ -37,8 +37,8 @@ export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
   if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
   // ✅ Check if partner user is deleted
-  const partnerId = String(request.senderId) === String(userId) 
-    ? request.receiverId 
+  const partnerId = String(request.senderId) === String(userId)
+    ? request.receiverId
     : request.senderId;
   const partner = await User.findById(partnerId).select("isDeleted");
   const isPartnerDeleted = partner && partner.isDeleted === true;
@@ -52,48 +52,48 @@ export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
       $push: { messages: { sender: userId, content: message, messageType: 'text' } }
     },
     { upsert: true, new: true }
-    ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
-    const last = convo.messages[convo.messages.length - 1];
-    const ts = formatMessageTimestamp(last.createdAt || Date.now());
-    const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
+  ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+  const last = convo.messages[convo.messages.length - 1];
+  const ts = formatMessageTimestamp(last.createdAt || Date.now());
+  const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
-    // ✅ Handle deleted users in sender info
-    // If partner is deleted, show "Profile Deleted" as sender info
-    let senderInfo;
-    if (isPartnerDeleted) {
-      // Partner is deleted, show deleted account details
+  // ✅ Handle deleted users in sender info
+  // If partner is deleted, show "Profile Deleted" as sender info
+  let senderInfo;
+  if (isPartnerDeleted) {
+    // Partner is deleted, show deleted account details
+    senderInfo = {
+      _id: String(userId),
+      firstname: "Profile",
+      lastname: "Deleted",
+      email: "",
+      profileimg: "/uploads/default.png",
+      isDeleted: true
+    };
+  } else if (last.sender?._id) {
+    if (last.sender.isDeleted === true) {
       senderInfo = {
-        _id: String(userId),
+        _id: String(last.sender._id),
         firstname: "Profile",
         lastname: "Deleted",
         email: "",
         profileimg: "/uploads/default.png",
         isDeleted: true
       };
-    } else if (last.sender?._id) {
-      if (last.sender.isDeleted === true) {
-        senderInfo = {
-          _id: String(last.sender._id),
-          firstname: "Profile",
-          lastname: "Deleted",
-          email: "",
-          profileimg: "/uploads/default.png",
-          isDeleted: true
-        };
-      } else {
-        senderInfo = {
-          _id: String(last.sender._id),
-          firstname: last.sender.firstname,
-          lastname: last.sender.lastname,
-          email: last.sender.email,
-          profileimg: last.sender.profileimg
-        };
-      }
     } else {
       senderInfo = {
-        _id: String(userId)
+        _id: String(last.sender._id),
+        firstname: last.sender.firstname,
+        lastname: last.sender.lastname,
+        email: last.sender.email,
+        profileimg: last.sender.profileimg
       };
     }
+  } else {
+    senderInfo = {
+      _id: String(userId)
+    };
+  }
   const messageData = {
     messageId: String(last._id),
     chatRequestId: chatId,
@@ -151,8 +151,8 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
     if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
     // ✅ Check if partner user is deleted
-    const partnerId = String(reqDoc.senderId) === String(userId) 
-      ? reqDoc.receiverId 
+    const partnerId = String(reqDoc.senderId) === String(userId)
+      ? reqDoc.receiverId
       : reqDoc.senderId;
     const partner = await User.findById(partnerId).select("isDeleted");
     const isPartnerDeleted = partner && partner.isDeleted === true;
@@ -522,8 +522,8 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
     if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
     // Check if partner user is deleted
-    const partnerId = String(reqDoc.senderId) === String(userId) 
-      ? reqDoc.receiverId 
+    const partnerId = String(reqDoc.senderId) === String(userId)
+      ? reqDoc.receiverId
       : reqDoc.senderId;
     const partner = await User.findById(partnerId).select("isDeleted");
     isPartnerDeleted = partner && partner.isDeleted === true;

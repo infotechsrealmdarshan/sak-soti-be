@@ -9,6 +9,7 @@ import authHelper from "../utils/authHelper.js";
 import { verifyFirebaseToken } from "../config/firebase.js";
 import Post from "../models/Post.js";
 import { createStripeCustomer, validateStripeCustomer } from "../utils/stripeHelper.js";
+import { checkAndExpireSubscription } from "../utils/subscriptionCron.js";
 
 const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,}$/;
 
@@ -153,28 +154,37 @@ export const loginUser = asyncHandler(async (req, res) => {
 export const getProfile = asyncHandler(async (req, res) => {
   const userId = req.user.id;
 
-  // Always fetch fresh data from database (don't use cache for profile)
-  // This ensures subscription status is always up-to-date
-  const user = await User.findById(userId);
+  // Fetch user
+  let user = await User.findById(userId);
 
-  // User not found - return 200 with status 0 (API worked, but user id not found)
   if (!user) {
     return successResponse(res, "User id not found", null, null, 200, 0);
   }
 
-  // Exclude password and firebaseToken from response
+  // Check subscription expiry
+  const { expired, user: updatedUser } = await checkAndExpireSubscription(user);
+  user = updatedUser;
+
+  // Convert user and remove sensitive fields
   const userResponse = user.toObject();
   delete userResponse.password;
   delete userResponse.firebaseToken;
 
-  // Update Redis cache with fresh data (without password/firebaseToken)
+  // Update cache
   try {
     await redisClient.setEx(`user:${userId}`, 3600, JSON.stringify(userResponse));
+    if (expired) {
+      console.log(`✅ Cache updated after subscription expiration for user: ${user.email}`);
+    }
   } catch (redisError) {
     console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
 
-  return successResponse(res, "Profile retrieved", { user: userResponse });
+  return successResponse(
+    res,
+    expired ? "Subscription expired, updated profile" : "Profile retrieved",
+    { user: userResponse }
+  );
 });
 
 export const updateProfile = asyncHandler(async (req, res) => {

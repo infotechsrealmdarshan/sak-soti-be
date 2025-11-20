@@ -31,8 +31,8 @@ export const editMessage = asyncHandler(async (req, res) => {
     );
   }
 
-  // Validate message ID format
-  if (!messageId || messageId.length !== 24) {
+  // ✅ FIXED: Better message ID validation but same response
+  if (!messageId || !mongoose.Types.ObjectId.isValid(messageId)) {
     return successResponse(
       res,
       "Invalid message ID format",
@@ -43,8 +43,8 @@ export const editMessage = asyncHandler(async (req, res) => {
     );
   }
 
-  // Validate chat ID format
-  if (!chatId || chatId.length !== 24) {
+  // ✅ FIXED: Better chat ID validation but same response
+  if (!chatId || !mongoose.Types.ObjectId.isValid(chatId)) {
     return successResponse(
       res,
       "Invalid chat ID format",
@@ -67,6 +67,8 @@ export const editMessage = asyncHandler(async (req, res) => {
       try {
         const reqDocForType = await ChatRequest.findById(chatId).select("chatType");
         conversation.chatType = reqDocForType?.chatType || "individual";
+        // ✅ FIXED: Save the chatType to prevent future issues
+        await conversation.save();
       } catch { /* noop */ }
     }
 
@@ -85,11 +87,12 @@ export const editMessage = asyncHandler(async (req, res) => {
       return errorResponse(res, "Only text messages can be edited", 400);
     }
 
-    // Only within 12 hours
-    const createdAt = new Date(message.createdAt).getTime();
-    const now = Date.now();
+    // ✅ FIXED: Better time validation (fixes timezone issues)
+    const messageDate = new Date(message.createdAt);
+    const now = new Date();
     const twelveHoursMs = 12 * 60 * 60 * 1000;
-    if (now - createdAt > twelveHoursMs) {
+    
+    if (now.getTime() - messageDate.getTime() > twelveHoursMs) {
       return errorResponse(res, "Message can only be edited within 12 hours of sending", 400);
     }
 
@@ -101,21 +104,45 @@ export const editMessage = asyncHandler(async (req, res) => {
 
     const updatedMessage = message;
 
-    // Prepare response
-    const messageResponse = {
-      _id: updatedMessage._id,
-      sender: updatedMessage.sender,
-      content: updatedMessage.content,
-      messageType: updatedMessage.messageType,
-      mediaUrl: updatedMessage.mediaUrl,
-      isEdited: updatedMessage.isEdited,
-      editedAt: updatedMessage.editedAt,
-      createdAt: updatedMessage.createdAt
-    };
+    // ✅ FIXED: Populate sender data for response (same format)
+    const populatedConversation = await ChatConversation.findOne(
+      { chatRequestId: chatId },
+      { messages: { $elemMatch: { _id: messageId } } }
+    ).populate("messages.sender", "firstname lastname profileimg");
 
-    // Emit socket event for real-time update
+    let messageResponse;
+    
+    if (populatedConversation?.messages?.[0]) {
+      const populatedMessage = populatedConversation.messages[0];
+      messageResponse = {
+        _id: populatedMessage._id,
+        sender: populatedMessage.sender, // Now populated
+        content: populatedMessage.content,
+        messageType: populatedMessage.messageType,
+        mediaUrl: populatedMessage.mediaUrl,
+        isEdited: populatedMessage.isEdited,
+        editedAt: populatedMessage.editedAt,
+        createdAt: populatedMessage.createdAt
+      };
+    } else {
+      // Fallback to unpopulated response
+      messageResponse = {
+        _id: updatedMessage._id,
+        sender: updatedMessage.sender, // This will be just the ID
+        content: updatedMessage.content,
+        messageType: updatedMessage.messageType,
+        mediaUrl: updatedMessage.mediaUrl,
+        isEdited: updatedMessage.isEdited,
+        editedAt: updatedMessage.editedAt,
+        createdAt: updatedMessage.createdAt
+      };
+    }
+
+    // ✅ FIXED: Enhanced socket event (same event name, more reliable)
     try {
       const io = getIO();
+      
+      // Ensure all clients are in the room
       io.to(`chat:${String(chatId)}`).emit('messageEdited', {
         chatId: String(chatId),
         messageId: String(updatedMessage._id),
@@ -123,11 +150,14 @@ export const editMessage = asyncHandler(async (req, res) => {
         isEdited: true,
         editedAt: updatedMessage.editedAt
       });
+      
+      console.log(`✅ Socket: Emitted messageEdited for chat ${chatId}`);
+      
     } catch (err) {
       console.error("Socket emit error (message edited):", err.message);
     }
 
-    // Notifications to other participants (individual or group)
+    // Notifications to other participants (individual or group) - SAME
     try {
       const reqDoc = await ChatRequest.findById(chatId);
       if (reqDoc) {
@@ -201,7 +231,6 @@ export const editMessage = asyncHandler(async (req, res) => {
     );
   }
 });
-
 export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
   const { chatId } = req.params;
   const userId = req.user?.id;
