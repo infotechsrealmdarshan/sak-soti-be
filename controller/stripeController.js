@@ -222,6 +222,12 @@ export const selectPlan = async (req, res) => {
       }
     );
 
+    const testSub = await Subscription.findOne({ userId: user._id });
+    console.log('🔍 Database Check:', {
+      stripePaymentIntentId: testSub.stripePaymentIntentId, // ✅ Check karo value store thayi ke nathi
+      stripeSubscriptionId: testSub.stripeSubscriptionId
+    });
+
     // ✅ ADD: Create Ephemeral Key for Flutter PaymentSheet
     const ephemeralKey = await stripe.ephemeralKeys.create(
       { customer: stripeCustomerId },
