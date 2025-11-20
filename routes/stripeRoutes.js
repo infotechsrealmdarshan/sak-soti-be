@@ -78,6 +78,7 @@ router.post("/select-plan", auth, selectPlan);
  *   post:
  *     tags: [Subscription]
  *     summary: Verify checkout session and activate subscription
+ *     description: Web checkout session verification only. For Flutter payments, use webhooks.
  *     security:
  *       - bearerAuth: []
  *     requestBody:
