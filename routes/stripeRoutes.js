@@ -77,8 +77,8 @@ router.post("/select-plan", auth, selectPlan);
  * /api/subscription/success-payment:
  *   post:
  *     tags: [Subscription]
- *     summary: Verify checkout session and activate subscription
- *     description: Web checkout session verification only. For Flutter payments, use webhooks.
+ *     summary: Verify payment intent and activate subscription (Flutter only)
+ *     description: For Flutter direct payments using Payment Intent
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -88,19 +88,19 @@ router.post("/select-plan", auth, selectPlan);
  *           schema:
  *             type: object
  *             required:
- *               - sessionId
+ *               - paymentIntentId
  *             properties:
- *               sessionId:
+ *               paymentIntentId:
  *                 type: string
- *                 description: Checkout Session ID from Stripe
- *                 example: cs_test_a11HZzzpL0VbV6N5xvHyBHQHPKKY0aEeVGRA0UUVJoZcxhiA6fIleb86du
+ *                 description: Payment Intent ID from Flutter Stripe SDK
+ *                 example: pi_3MtwBwLkdIwHu7ix28a3tqPa
  *     responses:
  *       200:
  *         description: Subscription activated successfully
  *       400:
- *         description: Bad request - missing sessionId or payment not completed
+ *         description: Bad request - missing paymentIntentId or payment not completed
  *       404:
- *         description: Session not found or no subscription
+ *         description: Payment intent not found or no subscription
  *       500:
  *         description: Internal server error
  */
