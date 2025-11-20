@@ -9,7 +9,7 @@ import {
   cancelSubscription,
   getSubscriptionById,
   selectPlan,
-  getPaymentMethodFromIntent,
+  verifyCheckoutSession,
 } from "../controller/stripeController.js";
 import { adminOnly } from "../middlewares/role.js";
 
@@ -77,7 +77,7 @@ router.post("/select-plan", auth, selectPlan);
  * /api/subscription/success-payment:
  *   post:
  *     tags: [Subscription]
- *     summary: Get payment method details from payment intent ID
+ *     summary: Verify checkout session and activate subscription
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -87,23 +87,23 @@ router.post("/select-plan", auth, selectPlan);
  *           schema:
  *             type: object
  *             required:
- *               - paymentIntentId
+ *               - sessionId
  *             properties:
- *               paymentIntentId:
+ *               sessionId:
  *                 type: string
- *                 description: Payment Intent ID
- *                 example: pi_3MtwBwLkdIwHu7ix28a3tqPa
+ *                 description: Checkout Session ID from Stripe
+ *                 example: cs_test_a11HZzzpL0VbV6N5xvHyBHQHPKKY0aEeVGRA0UUVJoZcxhiA6fIleb86du
  *     responses:
  *       200:
- *         description: Payment method details retrieved successfully
+ *         description: Subscription activated successfully
  *       400:
- *         description: Bad request - missing paymentIntentId
+ *         description: Bad request - missing sessionId or payment not completed
  *       404:
- *         description: Payment intent not found or no payment method
+ *         description: Session not found or no subscription
  *       500:
  *         description: Internal server error
  */
-router.post("/success-payment", auth, getPaymentMethodFromIntent);
+router.post("/success-payment", auth, verifyCheckoutSession);
 
 /**
  * @swagger
