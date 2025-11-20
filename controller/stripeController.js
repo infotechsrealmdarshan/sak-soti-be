@@ -18,7 +18,7 @@ const logSubscriptionLifecycle = async (eventType, stripeData, user = null, addi
   try {
     // ✅ IMPROVED: Extract ID from different data structures
     let dataId = 'Unknown ID';
-    
+
     if (stripeData) {
       if (stripeData.id) {
         dataId = stripeData.id;
@@ -194,24 +194,11 @@ export const selectPlan = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // ✅ FIX: Create BOTH Payment Intent AND Checkout Session
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: priceDetails.unit_amount, // amount in cents
-      currency: priceDetails.currency,
-      customer: stripeCustomerId,
-      automatic_payment_methods: {
-        enabled: true,
-      },
-      metadata: {
-        userId: user._id.toString(),
-        subscriptionRecordId: subscriptionRecord._id.toString(),
-        priceId: priceId.toString(),
-        planType: detectedPlanType.toString(),
-      },
-      description: `Subscription payment for ${detectedPlanType} plan`,
-    });
+    // ✅✅✅ REMOVE Payment Intent Creation - ONLY Use Checkout Session
+    // ❌ REMOVE this entire block:
+    // const paymentIntent = await stripe.paymentIntents.create({ ... });
 
-    // Create Stripe Checkout Session
+    // ✅ ONLY Create Checkout Session for Subscription
     const sessionData = {
       customer: stripeCustomerId,
       line_items: [
@@ -220,7 +207,7 @@ export const selectPlan = async (req, res) => {
           quantity: 1,
         },
       ],
-      mode: "subscription",
+      mode: "subscription", // This creates AUTO-RENEWING subscription
       success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/payment-cancel`,
       client_reference_id: subscriptionRecord._id.toString(),
@@ -238,7 +225,7 @@ export const selectPlan = async (req, res) => {
           subscriptionRecordId: subscriptionRecord._id.toString(),
         },
       },
-      
+
       payment_method_types: ['card'],
     };
 
@@ -249,31 +236,27 @@ export const selectPlan = async (req, res) => {
 
     const session = await stripe.checkout.sessions.create(sessionData);
 
-    await logSubscriptionLifecycle("PLAN_SELECTED", { 
-      priceId, 
+    await logSubscriptionLifecycle("PLAN_SELECTED", {
+      priceId,
       planType: detectedPlanType,
-      paymentIntentId: paymentIntent.id,
-      sessionId: session.id 
+      sessionId: session.id
     }, user, {
       apiSource: "selectPlan",
       checkoutSessionId: session.id,
-      paymentIntentId: paymentIntent.id,
       subscriptionRecordId: subscriptionRecord._id.toString(),
     });
 
-    // ✅ FIX: Return BOTH Payment Intent AND Checkout Session
+    // ✅✅✅ Return ONLY Checkout Session Data (Remove Payment Intent)
     return successResponse(res, "Plan selected successfully. Use checkout URL to complete subscription.", {
-      // Payment Intent details (for Flutter/React Native)
-      paymentIntentId: paymentIntent.id,
-      clientSecret: paymentIntent.client_secret,
-      
-      // Checkout Session details (for Web)
+      // ✅ ONLY Checkout Session details
       checkoutUrl: session.url,
       sessionId: session.id,
-      
-      // Common details
+
+      // ✅ Common details
       customerId: stripeCustomerId,
       requiresPayment: true,
+
+      // ✅ Subscription info
       subscription: {
         id: subscriptionRecord._id,
         status: "in_progress",
@@ -381,11 +364,17 @@ export const stripeWebhook = async (req, res) => {
       case "checkout.session.completed": {
         const session = eventData;
         console.log(`✅ Checkout session completed: ${session.id}`);
-        
+
         if (session.mode === "subscription" && session.subscription) {
           // Retrieve the subscription to get full details
           const subscription = await stripe.subscriptions.retrieve(session.subscription);
-          
+
+          // ✅ Find user from session metadata
+          const user = await User.findById(session.metadata?.userId);
+          if (!user && session.customer) {
+            user = await User.findOne({ stripeCustomerId: session.customer });
+          }
+
           await logSubscriptionLifecycle(
             'CHECKOUT_COMPLETED',
             session,
@@ -396,7 +385,37 @@ export const stripeWebhook = async (req, res) => {
               status: subscription.status
             }
           );
-          
+
+          // ✅ ACTIVATE SUBSCRIPTION HERE
+          if (user) {
+            const price = subscription.items?.data?.[0]?.price;
+            const { planType } = describePlan(price);
+
+            // Update user subscription
+            user.isSubscription = true;
+            user.subscriptionType = planType;
+            user.subscriptionStartDate = new Date(subscription.current_period_start * 1000);
+            user.subscriptionEndDate = new Date(subscription.current_period_end * 1000);
+            await user.save();
+
+            // Update subscription record
+            await Subscription.findOneAndUpdate(
+              { userId: user._id },
+              {
+                stripeSubscriptionId: subscription.id,
+                status: "active",
+                planType: planType,
+                startDate: new Date(subscription.current_period_start * 1000),
+                endDate: new Date(subscription.current_period_end * 1000),
+                currentPeriodStart: new Date(subscription.current_period_start * 1000),
+                currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+                activatedAt: new Date(),
+              }
+            );
+
+            console.log(`✅ Subscription activated via checkout: ${subscription.id} for user: ${user.email}`);
+          }
+
           console.log(`🔄 Checkout completed for subscription: ${subscription.id}`);
         }
         break;
@@ -497,7 +516,7 @@ export const stripeWebhook = async (req, res) => {
           user.isSubscription = sub.status === "active" || sub.status === "trialing";
 
           await user.save();
-          
+
           console.log(`✅ User subscription updated: ${user.email}, Status: ${user.isSubscription}, Type: ${user.subscriptionType}`);
         }
         break;
@@ -621,7 +640,7 @@ export const stripeWebhook = async (req, res) => {
           user.subscriptionType = null;
           user.subscriptionEndDate = null;
           await user.save();
-          
+
           console.log(`✅ User subscription canceled: ${user.email}`);
         }
         break;
@@ -647,7 +666,7 @@ export const stripeWebhook = async (req, res) => {
           // Optionally set user to not subscribed if payment fails
           // user.isSubscription = false;
           // await user.save();
-          
+
           console.log(`⚠️ Payment failed for user: ${user.email}`);
         }
         break;
@@ -1051,320 +1070,130 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Verify payment and activate subscription
- * @route POST /api/subscription/verify-payment
+ * @desc Verify checkout session and activate subscription
+ * @route POST /api/subscription/verify-session
  * @access Private
  */
-export const getPaymentMethodFromIntent = async (req, res) => {
+export const verifyCheckoutSession = async (req, res) => {
   try {
-    const { paymentIntentId } = req.body;
+    const { sessionId } = req.body;
     const userId = req.user.id;
 
-    console.log(`🔍 [PAYMENT_VERIFY] Starting payment verification for user: ${userId}, paymentIntent: ${paymentIntentId}`);
+    console.log(`🔍 [SESSION_VERIFY] Starting session verification: ${sessionId}`);
 
-    if (!paymentIntentId) {
-      console.log(`❌ [PAYMENT_VERIFY] Missing paymentIntentId for user: ${userId}`);
-      return errorResponse(res, "Payment Intent ID is required", 400);
+    if (!sessionId) {
+      return errorResponse(res, "Session ID is required", 400);
     }
 
-    // Retrieve payment intent
-    console.log(`🔍 [PAYMENT_VERIFY] Retrieving payment intent: ${paymentIntentId}`);
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
-      expand: ['payment_method', 'invoice.subscription']
+    // Retrieve checkout session with subscription details
+    const session = await stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ['subscription', 'subscription.items.data.price']
     });
 
-    console.log(`🔍 [PAYMENT_VERIFY] Payment Intent Status: ${paymentIntent.status}`);
-    console.log(`🔍 [PAYMENT_VERIFY] Payment Intent Amount: ${paymentIntent.amount}`);
-    console.log(`🔍 [PAYMENT_VERIFY] Payment Intent Invoice: ${paymentIntent.invoice}`);
+    console.log(`🔍 [SESSION_VERIFY] Session Status: ${session.status}`);
+    console.log(`🔍 [SESSION_VERIFY] Payment Status: ${session.payment_status}`);
+    console.log(`🔍 [SESSION_VERIFY] Subscription: ${session.subscription?.id}`);
 
-    // Check if payment was successful
-    if (paymentIntent.status !== 'succeeded') {
-      console.log(`❌ [PAYMENT_VERIFY] Payment not succeeded: ${paymentIntent.status}`);
-      return errorResponse(res, `Payment status: ${paymentIntent.status}. Please complete the payment first.`, 400);
+    // Check if session was completed successfully
+    if (session.status !== 'complete' || session.payment_status !== 'paid') {
+      return errorResponse(res, `Payment not completed. Status: ${session.status}`, 400);
     }
 
-    if (!paymentIntent.payment_method) {
-      console.log(`❌ [PAYMENT_VERIFY] No payment method found for payment intent: ${paymentIntentId}`);
-      return errorResponse(res, "No payment method found for this payment", 404);
+    if (!session.subscription) {
+      return errorResponse(res, "No subscription found in session", 404);
     }
 
     // Get user
-    console.log(`🔍 [PAYMENT_VERIFY] Finding user: ${userId}`);
     const user = await User.findById(userId);
-    if (!user) {
-      console.log(`❌ [PAYMENT_VERIFY] User not found: ${userId}`);
-      return errorResponse(res, "User not found", 404);
-    }
+    if (!user) return errorResponse(res, "User not found", 404);
 
-    console.log(`🔍 [PAYMENT_VERIFY] User found: ${user.email}, Stripe Customer: ${user.stripeCustomerId}`);
-    console.log(`🔍 [PAYMENT_VERIFY] Current user subscription status: isSubscription=${user.isSubscription}, subscriptionType=${user.subscriptionType}`);
+    const stripeSubscription = session.subscription;
+    const price = stripeSubscription.items.data[0]?.price;
+    const { planType: detectedPlanType } = describePlan(price);
 
-    const paymentMethod = paymentIntent.payment_method;
-    console.log(`🔍 [PAYMENT_VERIFY] Payment Method Type: ${paymentMethod.type}, ID: ${paymentMethod.id}`);
+    console.log(`✅ [SESSION_VERIFY] Activating subscription: ${stripeSubscription.id}`);
 
-    // Get subscription details
-    let stripeSubscription = null;
-    let invoice = null;
-
-    if (paymentIntent.invoice) {
-      console.log(`🔍 [PAYMENT_VERIFY] Payment intent has invoice: ${paymentIntent.invoice}`);
-      invoice = paymentIntent.invoice;
-
-      if (invoice.subscription) {
-        stripeSubscription = invoice.subscription;
-        console.log(`🔍 [PAYMENT_VERIFY] Found subscription from invoice: ${stripeSubscription.id}`);
-      } else {
-        console.log(`🔍 [PAYMENT_VERIFY] Invoice exists but no subscription attached`);
-      }
-    } else {
-      console.log(`🔍 [PAYMENT_VERIFY] No invoice found in payment intent`);
-    }
-
-    // If no subscription found, search for active ones
-    if (!stripeSubscription && user.stripeCustomerId) {
-      console.log(`🔍 [PAYMENT_VERIFY] Searching for subscriptions for customer: ${user.stripeCustomerId}`);
-      const subscriptions = await stripe.subscriptions.list({
-        customer: user.stripeCustomerId,
-        status: 'active',
-        limit: 1
-      });
-
-      console.log(`🔍 [PAYMENT_VERIFY] Found ${subscriptions.data.length} subscriptions for customer`);
-
-      if (subscriptions.data.length > 0) {
-        stripeSubscription = subscriptions.data[0];
-        console.log(`🔍 [PAYMENT_VERIFY] Using subscription from list: ${stripeSubscription.id}, status: ${stripeSubscription.status}`);
-      }
-    }
-
-    // ✅ Get the plan type from existing subscription record first
-    console.log(`🔍 [PAYMENT_VERIFY] Looking for existing subscription record for user`);
-    let subscriptionRecord = await Subscription.findOne({ userId: user._id });
-    let detectedPlanType = "monthly"; // default
-
-    if (subscriptionRecord) {
-      console.log(`🔍 [PAYMENT_VERIFY] Found existing subscription record: ${subscriptionRecord._id}`);
-      console.log(`🔍 [PAYMENT_VERIFY] Previous plan type: ${subscriptionRecord.planType}`);
-      console.log(`🔍 [PAYMENT_VERIFY] Previous status: ${subscriptionRecord.status}`);
-      
-      // ✅ Use the plan type from subscription record
-      detectedPlanType = subscriptionRecord.planType || "monthly";
-    } else {
-      console.log(`🔍 [PAYMENT_VERIFY] No existing subscription record found`);
-    }
-
-    // ✅ Also check payment intent metadata for plan type
-    if (paymentIntent.metadata?.planType) {
-      detectedPlanType = paymentIntent.metadata.planType;
-      console.log(`🔍 [PAYMENT_VERIFY] Using plan type from payment intent metadata: ${detectedPlanType}`);
-    }
-
-    // ✅ Calculate end date based on actual plan type
-    const now = new Date();
-    let defaultEndDate = new Date();
-
-    if (detectedPlanType === "yearly") {
-      defaultEndDate.setFullYear(defaultEndDate.getFullYear() + 1);
-      console.log(`🔍 [PAYMENT_VERIFY] Yearly plan - setting end date to 1 year from now: ${defaultEndDate}`);
-    } else if (detectedPlanType === "monthly") {
-      defaultEndDate.setMonth(defaultEndDate.getMonth() + 1);
-      console.log(`🔍 [PAYMENT_VERIFY] Monthly plan - setting end date to 1 month from now: ${defaultEndDate}`);
-    } else {
-      defaultEndDate.setMonth(defaultEndDate.getMonth() + 1);
-      console.log(`🔍 [PAYMENT_VERIFY] Unknown plan type (${detectedPlanType}) - defaulting to 1 month: ${defaultEndDate}`);
-    }
-
-    if (!stripeSubscription) {
-      console.log(`⚠️ [PAYMENT_VERIFY] No Stripe subscription found for user ${user.email}`);
-      console.log(`🔍 [PAYMENT_VERIFY] Using calculated end date for ${detectedPlanType} plan: ${defaultEndDate}`);
-    } else {
-      console.log(`✅ [PAYMENT_VERIFY] Stripe subscription found: ${stripeSubscription.id}`);
-      console.log(`🔍 [PAYMENT_VERIFY] Subscription status: ${stripeSubscription.status}`);
-      console.log(`🔍 [PAYMENT_VERIFY] Current period: ${new Date(stripeSubscription.current_period_start * 1000)} to ${new Date(stripeSubscription.current_period_end * 1000)}`);
-      
-      // Update detected plan type from Stripe subscription
-      const stripePlanType = describePlan(stripeSubscription.items.data[0]?.price).planType;
-      if (stripePlanType !== "unknown") {
-        detectedPlanType = stripePlanType;
-        console.log(`🔍 [PAYMENT_VERIFY] Updated plan type from Stripe: ${detectedPlanType}`);
-      }
-    }
-
-    // ✅ CRITICAL - Always set the subscriptionType on user
-    console.log(`🔍 [PAYMENT_VERIFY] Setting user subscription to active with type: ${detectedPlanType}`);
-
+    // ✅ UPDATE USER SUBSCRIPTION
     user.isSubscription = true;
-    user.subscriptionActivatedAt = now;
-    user.subscriptionType = detectedPlanType; // ✅ This was missing!
-
-    if (stripeSubscription) {
-      user.subscriptionStartDate = new Date(stripeSubscription.current_period_start * 1000);
-      user.subscriptionEndDate = new Date(stripeSubscription.current_period_end * 1000);
-      console.log(`🔍 [PAYMENT_VERIFY] User dates from Stripe - Start: ${user.subscriptionStartDate}, End: ${user.subscriptionEndDate}, Type: ${detectedPlanType}`);
-    } else {
-      // ✅ Set both dates when no Stripe subscription found - use calculated dates based on plan type
-      user.subscriptionStartDate = now;
-      user.subscriptionEndDate = defaultEndDate;
-      console.log(`🔍 [PAYMENT_VERIFY] User dates set manually - Start: ${user.subscriptionStartDate}, End: ${user.subscriptionEndDate}, Type: ${detectedPlanType}`);
-    }
-
-    console.log(`🔍 [PAYMENT_VERIFY] Saving user to database...`);
-    console.log(`🔍 [PAYMENT_VERIFY] User subscription data before save:`, {
-      isSubscription: user.isSubscription,
-      subscriptionType: user.subscriptionType,
-      subscriptionStartDate: user.subscriptionStartDate,
-      subscriptionEndDate: user.subscriptionEndDate
-    });
-    
+    user.subscriptionType = detectedPlanType;
+    user.subscriptionStartDate = new Date(stripeSubscription.current_period_start * 1000);
+    user.subscriptionEndDate = new Date(stripeSubscription.current_period_end * 1000);
+    user.subscriptionActivatedAt = new Date();
     await user.save();
-    console.log(`✅ [PAYMENT_VERIFY] User saved successfully`);
 
-    // Update subscription record
-    if (subscriptionRecord) {
-      console.log(`🔍 [PAYMENT_VERIFY] Updating existing subscription record: ${subscriptionRecord._id}`);
-      console.log(`🔍 [PAYMENT_VERIFY] Previous status: ${subscriptionRecord.status}`);
-
-      subscriptionRecord.status = "active";
-      subscriptionRecord.stripeSubscriptionId = stripeSubscription?.id || `sub_${Date.now()}`;
-      subscriptionRecord.stripePaymentIntentId = paymentIntentId;
-      subscriptionRecord.paymentMethodId = paymentMethod.id;
-      subscriptionRecord.activatedAt = now;
-      subscriptionRecord.startDate = user.subscriptionStartDate;
-      subscriptionRecord.endDate = user.subscriptionEndDate;
-      subscriptionRecord.planType = detectedPlanType; // ✅ Ensure plan type is set
-
-      if (stripeSubscription) {
-        subscriptionRecord.currentPeriodStart = new Date(stripeSubscription.current_period_start * 1000);
-        subscriptionRecord.currentPeriodEnd = new Date(stripeSubscription.current_period_end * 1000);
-      } else {
-        // ✅ Set default period dates when no Stripe subscription
-        subscriptionRecord.currentPeriodStart = now;
-        subscriptionRecord.currentPeriodEnd = defaultEndDate;
-      }
-
-      console.log(`🔍 [PAYMENT_VERIFY] Subscription record dates - Start: ${subscriptionRecord.startDate}, End: ${subscriptionRecord.endDate}, Type: ${subscriptionRecord.planType}`);
-    } else {
-      console.log(`🔍 [PAYMENT_VERIFY] No existing subscription record found, creating new one`);
-
-      const price = stripeSubscription?.items.data[0]?.price;
-
-      // ✅ Ensure all required fields have values with correct plan type
-      subscriptionRecord = new Subscription({
-        userId: user._id,
-        stripeCustomerId: user.stripeCustomerId,
-        stripeSubscriptionId: stripeSubscription?.id || `sub_${Date.now()}`,
-        stripePaymentIntentId: paymentIntentId,
-        paymentMethodId: paymentMethod.id,
+    // ✅ UPDATE SUBSCRIPTION RECORD
+    await Subscription.findOneAndUpdate(
+      { userId: user._id },
+      {
+        stripeSubscriptionId: stripeSubscription.id,
+        stripeCustomerId: stripeSubscription.customer,
         priceId: price?.id,
-        amount: price?.unit_amount ? price.unit_amount / 100 : paymentIntent.amount / 100,
-        currency: price?.currency || paymentIntent.currency,
-        planType: detectedPlanType, // ✅ Use the detected plan type
+        amount: price?.unit_amount ? price.unit_amount / 100 : 0,
+        currency: price?.currency,
+        planType: detectedPlanType,
         status: "active",
-        startDate: user.subscriptionStartDate,
-        endDate: user.subscriptionEndDate,
-        currentPeriodStart: stripeSubscription ? new Date(stripeSubscription.current_period_start * 1000) : user.subscriptionStartDate,
-        currentPeriodEnd: stripeSubscription ? new Date(stripeSubscription.current_period_end * 1000) : user.subscriptionEndDate,
-        activatedAt: now,
-      });
-    }
-
-    console.log(`🔍 [PAYMENT_VERIFY] Saving subscription record...`);
-    await subscriptionRecord.save();
-    console.log(`✅ [PAYMENT_VERIFY] Subscription record saved: ${subscriptionRecord._id}`);
-    console.log(`🔍 [PAYMENT_VERIFY] Subscription record details:`, {
-      id: subscriptionRecord._id,
-      stripeSubscriptionId: subscriptionRecord.stripeSubscriptionId,
-      status: subscriptionRecord.status,
-      planType: subscriptionRecord.planType,
-      startDate: subscriptionRecord.startDate,
-      endDate: subscriptionRecord.endDate
-    });
-
-    // ✅ Double-check that user has subscriptionType set
-    const updatedUser = await User.findById(userId);
-    console.log(`🔍 [PAYMENT_VERIFY] Final user verification - subscriptionType: ${updatedUser.subscriptionType}`);
+        startDate: new Date(stripeSubscription.current_period_start * 1000),
+        endDate: new Date(stripeSubscription.current_period_end * 1000),
+        currentPeriodStart: new Date(stripeSubscription.current_period_start * 1000),
+        currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
+        activatedAt: new Date(),
+      },
+      { upsert: true, new: true }
+    );
 
     // Log and notify
-    console.log(`🔍 [PAYMENT_VERIFY] Creating lifecycle log...`);
     await logSubscriptionLifecycle(
-      'PAYMENT_VERIFIED_AND_ACTIVATED',
+      'CHECKOUT_SESSION_VERIFIED',
       {
-        paymentIntentId,
-        subscriptionId: stripeSubscription?.id,
-        userStartDate: user.subscriptionStartDate,
-        userEndDate: user.subscriptionEndDate,
+        sessionId,
+        subscriptionId: stripeSubscription.id,
         planType: detectedPlanType
       },
       user,
-      {
-        apiSource: 'verify-payment',
-        paymentMethodId: paymentMethod.id
-      }
+      { apiSource: 'verify-session' }
     );
 
-    console.log(`🔍 [PAYMENT_VERIFY] Sending notification to user...`);
     await notifyUser(
       user,
-      "Payment Verified & Subscription Activated 🎉",
-      `Your ${detectedPlanType} subscription is now active until ${user.subscriptionEndDate.toLocaleDateString()}. Thank you for your payment!`,
+      "Subscription Activated 🎉",
+      `Your ${detectedPlanType} subscription is now active! Auto-renewal is enabled.`,
       {
         deeplink: "/subscription",
         data: {
           action: "subscription_activated",
-          paymentIntentId: paymentIntentId,
-          startDate: user.subscriptionStartDate,
-          endDate: user.subscriptionEndDate,
+          subscriptionId: stripeSubscription.id,
           planType: detectedPlanType
         },
       }
     );
 
-    console.log(`✅ [PAYMENT_VERIFY] SUCCESS - Payment verified and subscription activated for user: ${user.email}`);
-    console.log(`🔍 [PAYMENT_VERIFY] Final user status: isSubscription=${user.isSubscription}, type=${user.subscriptionType}`);
-    console.log(`🔍 [PAYMENT_VERIFY] Final subscription record: ${subscriptionRecord._id}, status=${subscriptionRecord.status}, type=${subscriptionRecord.planType}`);
+    console.log(`✅ [SESSION_VERIFY] Subscription activated: ${stripeSubscription.id}`);
 
-    return successResponse(res, "Payment verified and subscription activated successfully!", {
-      payment: {
-        paymentIntentId: paymentIntent.id,
-        status: paymentIntent.status,
-        amount: paymentIntent.amount,
-        currency: paymentIntent.currency
-      },
+    return successResponse(res, "Subscription activated successfully!", {
       subscription: {
-        id: subscriptionRecord._id,
+        id: stripeSubscription.id,
         status: "active",
-        planType: subscriptionRecord.planType,
-        startDate: subscriptionRecord.startDate,
-        endDate: subscriptionRecord.endDate,
+        planType: detectedPlanType,
+        startDate: new Date(stripeSubscription.current_period_start * 1000),
+        endDate: new Date(stripeSubscription.current_period_end * 1000),
+        isAutoRenew: true,
       },
       user: {
-        isSubscription: user.isSubscription,
-        subscriptionType: user.subscriptionType,
-        subscriptionStartDate: user.subscriptionStartDate,
-        subscriptionEndDate: user.subscriptionEndDate
-      },
-      message: `Your ${detectedPlanType} subscription is now active!`
+        isSubscription: true,
+        subscriptionType: detectedPlanType,
+      }
     });
 
   } catch (error) {
-    console.error("❌ [PAYMENT_VERIFY] verifyPaymentSuccess error:", error);
-    console.error("❌ [PAYMENT_VERIFY] Error details:", error.stack);
-
+    console.error("❌ [SESSION_VERIFY] Error:", error);
+    
     await logSubscriptionLifecycle(
-      'PAYMENT_VERIFICATION_FAILED',
+      'SESSION_VERIFICATION_FAILED',
       { error: error.message },
       null,
-      {
-        apiSource: 'verify-payment',
-        stack: error.stack
-      }
+      { apiSource: 'verify-session', stack: error.stack }
     );
 
-    if (error.code === 'resource_missing') {
-      console.log(`❌ [PAYMENT_VERIFY] Resource missing error - Payment Intent may not exist`);
-      return errorResponse(res, "Payment Intent does not exist. Please check and try again.", 404);
-    }
-
-    return errorResponse(res, "Payment verification failed: " + error.message, 500);
+    return errorResponse(res, "Session verification failed: " + error.message, 500);
   }
 };
