@@ -284,6 +284,7 @@ export const selectPlan = async (req, res) => {
     return successResponse(res, "Plan selected successfully. Complete payment to activate your subscription", {
       // ✅ For Flutter Stripe SDK - Direct Payment (Pay button)
       paymentIntentClientSecret: paymentIntent.client_secret,
+      paymentIntentId: paymentIntent.id,
       subscriptionId: stripeSubscription.id,
       
       // ✅ ADDED: For Flutter PaymentSheet customer integration
@@ -1110,56 +1111,63 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Verify checkout session and activate subscription - Web only
+ * @desc Verify payment intent and activate subscription - Flutter only
  * @route POST /api/subscription/success-payment
  * @access Private
  */
 export const verifyCheckoutSession = async (req, res) => {
   try {
-    const { sessionId } = req.body;
+    const { paymentIntentId } = req.body;
     const userId = req.user.id;
 
-    console.log(`🔍 [SUCCESS_PAYMENT] Starting verification for user: ${userId}`);
+    console.log(`🔍 [FLUTTER_PAYMENT] Starting verification for user: ${userId}`);
 
-    if (!sessionId) {
-      return errorResponse(res, "sessionId is required", 400);
+    if (!paymentIntentId) {
+      return errorResponse(res, "paymentIntentId is required", 400);
     }
 
     // Get user first
     const user = await User.findById(userId);
     if (!user) return errorResponse(res, "User not found", 404);
 
-    console.log(`🔍 [SUCCESS_PAYMENT] Using session verification: ${sessionId}`);
+    console.log(`🔍 [FLUTTER_PAYMENT] Using payment intent verification: ${paymentIntentId}`);
     
-    // Retrieve checkout session with subscription details
-    const session = await stripe.checkout.sessions.retrieve(sessionId, {
-      expand: ['subscription', 'subscription.items.data.price']
+    // ✅ Find subscription by payment intent ID
+    const subscriptionRecord = await Subscription.findOne({ 
+      stripePaymentIntentId: paymentIntentId 
+    });
+    
+    if (!subscriptionRecord) {
+      return errorResponse(res, "No subscription found for this payment intent", 404);
+    }
+
+    // ✅ Retrieve payment intent to check status
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    
+    console.log(`🔍 [FLUTTER_PAYMENT] Payment Intent Status: ${paymentIntent.status}`);
+
+    if (paymentIntent.status !== 'succeeded') {
+      return errorResponse(res, `Payment not completed. Status: ${paymentIntent.status}`, 400);
+    }
+
+    // ✅ Retrieve subscription
+    const stripeSubscription = await stripe.subscriptions.retrieve(
+      subscriptionRecord.stripeSubscriptionId, {
+      expand: ['items.data.price']
     });
 
-    console.log(`🔍 [SUCCESS_PAYMENT] Session Status: ${session.status}`);
-    console.log(`🔍 [SUCCESS_PAYMENT] Payment Status: ${session.payment_status}`);
-
-    // Check if session was completed successfully
-    if (session.status !== 'complete' || session.payment_status !== 'paid') {
-      return errorResponse(res, `Payment not completed. Status: ${session.status}`, 400);
-    }
-
-    if (!session.subscription) {
-      return errorResponse(res, "No subscription found in session", 404);
-    }
-
-    const stripeSubscription = session.subscription;
+    // Get plan type
     const price = stripeSubscription.items.data[0]?.price;
     const { planType: detectedPlanType } = describePlan(price);
 
-    // ✅ CHECK: Avoid duplicate activation (webhook might have already activated it)
+    // ✅ CHECK: Avoid duplicate activation
     const existingActiveSub = await Subscription.findOne({
       stripeSubscriptionId: stripeSubscription.id,
       status: "active"
     });
 
     if (existingActiveSub) {
-      console.log(`ℹ️ [SUCCESS_PAYMENT] Subscription already active: ${stripeSubscription.id}`);
+      console.log(`ℹ️ [FLUTTER_PAYMENT] Subscription already active: ${stripeSubscription.id}`);
       return successResponse(res, "Subscription already active", {
         subscription: {
           id: stripeSubscription.id,
@@ -1169,7 +1177,7 @@ export const verifyCheckoutSession = async (req, res) => {
       });
     }
 
-    console.log(`✅ [SUCCESS_PAYMENT] Activating subscription: ${stripeSubscription.id}`);
+    console.log(`✅ [FLUTTER_PAYMENT] Activating subscription: ${stripeSubscription.id}`);
 
     // ✅ UPDATE USER SUBSCRIPTION
     user.isSubscription = true;
@@ -1184,25 +1192,22 @@ export const verifyCheckoutSession = async (req, res) => {
       { userId: user._id },
       {
         stripeSubscriptionId: stripeSubscription.id,
-        stripeCustomerId: stripeSubscription.customer,
-        priceId: price?.id,
-        amount: price?.unit_amount ? price.unit_amount / 100 : 0,
-        currency: price?.currency,
-        planType: detectedPlanType,
+        paymentMethodId: paymentIntent.payment_method,
         status: "active",
+        planType: detectedPlanType,
         startDate: new Date(stripeSubscription.current_period_start * 1000),
         endDate: new Date(stripeSubscription.current_period_end * 1000),
         currentPeriodStart: new Date(stripeSubscription.current_period_start * 1000),
         currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
         activatedAt: new Date(),
       },
-      { upsert: true, new: true }
+      { upsert: true }
     );
 
     await logSubscriptionLifecycle(
-      'CHECKOUT_SESSION_VERIFIED',
+      'PAYMENT_INTENT_VERIFIED',
       {
-        sessionId,
+        paymentIntentId,
         subscriptionId: stripeSubscription.id,
         planType: detectedPlanType
       },
@@ -1224,12 +1229,12 @@ export const verifyCheckoutSession = async (req, res) => {
       }
     );
 
-    console.log(`✅ [SUCCESS_PAYMENT] Subscription activated via session: ${stripeSubscription.id}`);
+    console.log(`✅ [FLUTTER_PAYMENT] Subscription activated via payment intent: ${stripeSubscription.id}`);
 
     return successResponse(res, "Subscription activated successfully!", {
       subscription: {
         id: stripeSubscription.id,
-        status: stripeSubscription.status,
+        status: "active",
         planType: detectedPlanType,
         startDate: new Date(stripeSubscription.current_period_start * 1000),
         endDate: new Date(stripeSubscription.current_period_end * 1000),
@@ -1238,11 +1243,11 @@ export const verifyCheckoutSession = async (req, res) => {
       user: {
         isSubscription: true,
         subscriptionType: detectedPlanType,
-      },
+      }
     });
 
   } catch (error) {
-    console.error("❌ [SUCCESS_PAYMENT] Error:", error);
+    console.error("❌ [FLUTTER_PAYMENT] Error:", error);
     
     await logSubscriptionLifecycle(
       'SUCCESS_PAYMENT_FAILED',
@@ -1258,4 +1263,4 @@ export const verifyCheckoutSession = async (req, res) => {
 
     return errorResponse(res, "Payment verification failed: " + error.message, 500);
   }
-};  
+};
