@@ -194,37 +194,41 @@ export const selectPlan = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // ✅ ADD: Create Setup Intent for Flutter Stripe SDK
-    const setupIntent = await stripe.setupIntents.create({
-      customer: stripeCustomerId,
-      payment_method_types: ['card'],
-      metadata: {
-        userId: user._id.toString(),
-        subscriptionRecordId: subscriptionRecord._id.toString(),
-        priceId: priceId.toString(),
-        planType: detectedPlanType.toString(),
-      },
-      usage: 'off_session', // Important for subscriptions
-    });
-
-    // ✅ ADD: Create Subscription (incomplete state)
+    // ✅ Create Subscription with Payment Intent
     const stripeSubscription = await stripe.subscriptions.create({
       customer: stripeCustomerId,
       items: [{ price: priceId }],
-      payment_behavior: 'default_incomplete', // Important for manual payment
+      payment_behavior: 'default_incomplete', // Creates subscription but waits for payment
       payment_settings: { 
         save_default_payment_method: 'on_subscription', // Save for auto-renew
       },
-      expand: ['latest_invoice'],
+      expand: ['latest_invoice.payment_intent'], // Get payment intent for immediate payment
       metadata: {
         userId: user._id.toString(),
         planType: detectedPlanType.toString(),
         subscriptionRecordId: subscriptionRecord._id.toString(),
-        setupIntentId: setupIntent.id, // Link setup intent
       },
     });
 
-    // Create Stripe Checkout Session (keep for web users)
+    // Get the payment intent for immediate payment
+    const paymentIntent = stripeSubscription.latest_invoice.payment_intent;
+
+    // ✅ Update subscription record with real subscription ID
+    await Subscription.findOneAndUpdate(
+      { userId: user._id },
+      {
+        stripeSubscriptionId: stripeSubscription.id,
+        stripePaymentIntentId: paymentIntent.id,
+      }
+    );
+
+    // ✅ ADD: Create Ephemeral Key for Flutter PaymentSheet
+    const ephemeralKey = await stripe.ephemeralKeys.create(
+      { customer: stripeCustomerId },
+      { apiVersion: '2023-10-16' } // Use your Stripe API version
+    );
+
+    // ✅ ADD: Create Checkout Session for web users
     const sessionData = {
       customer: stripeCustomerId,
       line_items: [
@@ -265,32 +269,32 @@ export const selectPlan = async (req, res) => {
     await logSubscriptionLifecycle("PLAN_SELECTED", {
       priceId,
       planType: detectedPlanType,
-      sessionId: session.id,
-      setupIntentId: setupIntent.id,
-      subscriptionId: stripeSubscription.id
+      subscriptionId: stripeSubscription.id,
+      paymentIntentId: paymentIntent.id,
+      sessionId: session.id
     }, user, {
       apiSource: "selectPlan",
-      checkoutSessionId: session.id,
-      setupIntentId: setupIntent.id,
       subscriptionId: stripeSubscription.id,
+      paymentIntentId: paymentIntent.id,
+      checkoutSessionId: session.id,
       subscriptionRecordId: subscriptionRecord._id.toString(),
     });
 
-    // ✅ UPDATED: Return BOTH Setup Intent AND Checkout Session
-    return successResponse(res, "Plan selected successfully. Complete payment setup.", {
-      // ✅ For Flutter Stripe SDK (in-app dialog)
-      setupIntentClientSecret: setupIntent.client_secret,
+    // ✅ Return BOTH Payment Intent AND Checkout Session WITH Ephemeral Key
+    return successResponse(res, "Plan selected successfully. Complete payment to activate your subscription", {
+      // ✅ For Flutter Stripe SDK - Direct Payment (Pay button)
+      paymentIntentClientSecret: paymentIntent.client_secret,
       subscriptionId: stripeSubscription.id,
       
-      // ✅ For Web (checkout URL)
+      // ✅ ADDED: For Flutter PaymentSheet customer integration
+      customerId: stripeCustomerId,
+      customerEphemeralKeySecret: ephemeralKey.secret, // ✅ ADDED THIS
+      
+      // ✅ ADDED: For Web (checkout URL)
       checkoutUrl: session.url,
       sessionId: session.id,
 
-      // ✅ Common details
-      customerId: stripeCustomerId,
-      requiresPayment: true,
-
-      // ✅ Subscription info
+      // ✅ Subscription details
       subscription: {
         id: subscriptionRecord._id,
         stripeSubscriptionId: stripeSubscription.id,
@@ -299,6 +303,8 @@ export const selectPlan = async (req, res) => {
         amount: priceDetails.unit_amount / 100,
         currency: priceDetails.currency,
       },
+      
+      requiresPayment: true,
     });
   } catch (error) {
     console.error("❌ selectPlan error:", error);
@@ -316,7 +322,6 @@ export const selectPlan = async (req, res) => {
     return errorResponse(res, "Error selecting plan: " + error.message, 500);
   }
 };
-
 /**
  * @desc Get available plan details - Direct Stripe API response
  * @route GET /api/subscription/plans
@@ -1105,8 +1110,8 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Verify checkout session and activate subscription
- * @route POST /api/subscription/verify-session
+ * @desc Verify checkout session and activate subscription - Web only
+ * @route POST /api/subscription/success-payment
  * @access Private
  */
 export const verifyCheckoutSession = async (req, res) => {
@@ -1114,20 +1119,25 @@ export const verifyCheckoutSession = async (req, res) => {
     const { sessionId } = req.body;
     const userId = req.user.id;
 
-    console.log(`🔍 [SESSION_VERIFY] Starting session verification: ${sessionId}`);
+    console.log(`🔍 [SUCCESS_PAYMENT] Starting verification for user: ${userId}`);
 
     if (!sessionId) {
-      return errorResponse(res, "Session ID is required", 400);
+      return errorResponse(res, "sessionId is required", 400);
     }
 
+    // Get user first
+    const user = await User.findById(userId);
+    if (!user) return errorResponse(res, "User not found", 404);
+
+    console.log(`🔍 [SUCCESS_PAYMENT] Using session verification: ${sessionId}`);
+    
     // Retrieve checkout session with subscription details
     const session = await stripe.checkout.sessions.retrieve(sessionId, {
       expand: ['subscription', 'subscription.items.data.price']
     });
 
-    console.log(`🔍 [SESSION_VERIFY] Session Status: ${session.status}`);
-    console.log(`🔍 [SESSION_VERIFY] Payment Status: ${session.payment_status}`);
-    console.log(`🔍 [SESSION_VERIFY] Subscription: ${session.subscription?.id}`);
+    console.log(`🔍 [SUCCESS_PAYMENT] Session Status: ${session.status}`);
+    console.log(`🔍 [SUCCESS_PAYMENT] Payment Status: ${session.payment_status}`);
 
     // Check if session was completed successfully
     if (session.status !== 'complete' || session.payment_status !== 'paid') {
@@ -1138,15 +1148,28 @@ export const verifyCheckoutSession = async (req, res) => {
       return errorResponse(res, "No subscription found in session", 404);
     }
 
-    // Get user
-    const user = await User.findById(userId);
-    if (!user) return errorResponse(res, "User not found", 404);
-
     const stripeSubscription = session.subscription;
     const price = stripeSubscription.items.data[0]?.price;
     const { planType: detectedPlanType } = describePlan(price);
 
-    console.log(`✅ [SESSION_VERIFY] Activating subscription: ${stripeSubscription.id}`);
+    // ✅ CHECK: Avoid duplicate activation (webhook might have already activated it)
+    const existingActiveSub = await Subscription.findOne({
+      stripeSubscriptionId: stripeSubscription.id,
+      status: "active"
+    });
+
+    if (existingActiveSub) {
+      console.log(`ℹ️ [SUCCESS_PAYMENT] Subscription already active: ${stripeSubscription.id}`);
+      return successResponse(res, "Subscription already active", {
+        subscription: {
+          id: stripeSubscription.id,
+          status: "active",
+          planType: detectedPlanType,
+        }
+      });
+    }
+
+    console.log(`✅ [SUCCESS_PAYMENT] Activating subscription: ${stripeSubscription.id}`);
 
     // ✅ UPDATE USER SUBSCRIPTION
     user.isSubscription = true;
@@ -1176,7 +1199,6 @@ export const verifyCheckoutSession = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // Log and notify
     await logSubscriptionLifecycle(
       'CHECKOUT_SESSION_VERIFIED',
       {
@@ -1185,7 +1207,7 @@ export const verifyCheckoutSession = async (req, res) => {
         planType: detectedPlanType
       },
       user,
-      { apiSource: 'verify-session' }
+      { apiSource: 'success-payment' }
     );
 
     await notifyUser(
@@ -1202,7 +1224,7 @@ export const verifyCheckoutSession = async (req, res) => {
       }
     );
 
-    console.log(`✅ [SESSION_VERIFY] Subscription activated: ${stripeSubscription.id}`);
+    console.log(`✅ [SUCCESS_PAYMENT] Subscription activated via session: ${stripeSubscription.id}`);
 
     return successResponse(res, "Subscription activated successfully!", {
       subscription: {
@@ -1220,15 +1242,20 @@ export const verifyCheckoutSession = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ [SESSION_VERIFY] Error:", error);
+    console.error("❌ [SUCCESS_PAYMENT] Error:", error);
     
     await logSubscriptionLifecycle(
-      'SESSION_VERIFICATION_FAILED',
+      'SUCCESS_PAYMENT_FAILED',
       { error: error.message },
       null,
-      { apiSource: 'verify-session', stack: error.stack }
+      { apiSource: 'success-payment', stack: error.stack }
     );
 
-    return errorResponse(res, "Session verification failed: " + error.message, 500);
+    // Handle specific Stripe errors
+    if (error.type === 'StripeInvalidRequestError') {
+      return errorResponse(res, "Invalid Stripe request: " + error.message, 400);
+    }
+
+    return errorResponse(res, "Payment verification failed: " + error.message, 500);
   }
-};
+};  
