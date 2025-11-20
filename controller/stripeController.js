@@ -194,11 +194,37 @@ export const selectPlan = async (req, res) => {
       { upsert: true, new: true }
     );
 
-    // ✅✅✅ REMOVE Payment Intent Creation - ONLY Use Checkout Session
-    // ❌ REMOVE this entire block:
-    // const paymentIntent = await stripe.paymentIntents.create({ ... });
+    // ✅ ADD: Create Setup Intent for Flutter Stripe SDK
+    const setupIntent = await stripe.setupIntents.create({
+      customer: stripeCustomerId,
+      payment_method_types: ['card'],
+      metadata: {
+        userId: user._id.toString(),
+        subscriptionRecordId: subscriptionRecord._id.toString(),
+        priceId: priceId.toString(),
+        planType: detectedPlanType.toString(),
+      },
+      usage: 'off_session', // Important for subscriptions
+    });
 
-    // ✅ ONLY Create Checkout Session for Subscription
+    // ✅ ADD: Create Subscription (incomplete state)
+    const stripeSubscription = await stripe.subscriptions.create({
+      customer: stripeCustomerId,
+      items: [{ price: priceId }],
+      payment_behavior: 'default_incomplete', // Important for manual payment
+      payment_settings: { 
+        save_default_payment_method: 'on_subscription', // Save for auto-renew
+      },
+      expand: ['latest_invoice'],
+      metadata: {
+        userId: user._id.toString(),
+        planType: detectedPlanType.toString(),
+        subscriptionRecordId: subscriptionRecord._id.toString(),
+        setupIntentId: setupIntent.id, // Link setup intent
+      },
+    });
+
+    // Create Stripe Checkout Session (keep for web users)
     const sessionData = {
       customer: stripeCustomerId,
       line_items: [
@@ -207,7 +233,7 @@ export const selectPlan = async (req, res) => {
           quantity: 1,
         },
       ],
-      mode: "subscription", // This creates AUTO-RENEWING subscription
+      mode: "subscription",
       success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/payment-cancel`,
       client_reference_id: subscriptionRecord._id.toString(),
@@ -239,16 +265,24 @@ export const selectPlan = async (req, res) => {
     await logSubscriptionLifecycle("PLAN_SELECTED", {
       priceId,
       planType: detectedPlanType,
-      sessionId: session.id
+      sessionId: session.id,
+      setupIntentId: setupIntent.id,
+      subscriptionId: stripeSubscription.id
     }, user, {
       apiSource: "selectPlan",
       checkoutSessionId: session.id,
+      setupIntentId: setupIntent.id,
+      subscriptionId: stripeSubscription.id,
       subscriptionRecordId: subscriptionRecord._id.toString(),
     });
 
-    // ✅✅✅ Return ONLY Checkout Session Data (Remove Payment Intent)
-    return successResponse(res, "Plan selected successfully. Use checkout URL to complete subscription.", {
-      // ✅ ONLY Checkout Session details
+    // ✅ UPDATED: Return BOTH Setup Intent AND Checkout Session
+    return successResponse(res, "Plan selected successfully. Complete payment setup.", {
+      // ✅ For Flutter Stripe SDK (in-app dialog)
+      setupIntentClientSecret: setupIntent.client_secret,
+      subscriptionId: stripeSubscription.id,
+      
+      // ✅ For Web (checkout URL)
       checkoutUrl: session.url,
       sessionId: session.id,
 
@@ -259,6 +293,7 @@ export const selectPlan = async (req, res) => {
       // ✅ Subscription info
       subscription: {
         id: subscriptionRecord._id,
+        stripeSubscriptionId: stripeSubscription.id,
         status: "in_progress",
         planType: detectedPlanType,
         amount: priceDetails.unit_amount / 100,
@@ -1172,7 +1207,7 @@ export const verifyCheckoutSession = async (req, res) => {
     return successResponse(res, "Subscription activated successfully!", {
       subscription: {
         id: stripeSubscription.id,
-        status: "active",
+        status: stripeSubscription.status,
         planType: detectedPlanType,
         startDate: new Date(stripeSubscription.current_period_start * 1000),
         endDate: new Date(stripeSubscription.current_period_end * 1000),
@@ -1181,7 +1216,7 @@ export const verifyCheckoutSession = async (req, res) => {
       user: {
         isSubscription: true,
         subscriptionType: detectedPlanType,
-      }
+      },
     });
 
   } catch (error) {
