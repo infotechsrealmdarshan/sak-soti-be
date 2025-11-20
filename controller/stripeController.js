@@ -1192,16 +1192,16 @@ export const verifyCheckoutSession = async (req, res) => {
 
     console.log(`✅ [FLUTTER_PAYMENT] Activating subscription: ${stripeSubscription.id}`);
 
-    // ✅ UPDATE USER SUBSCRIPTION
+    // ✅ UPDATE USER SUBSCRIPTION - ADD AWAIT
     user.isSubscription = true;
     user.subscriptionType = detectedPlanType;
     user.subscriptionStartDate = new Date(stripeSubscription.current_period_start * 1000);
     user.subscriptionEndDate = new Date(stripeSubscription.current_period_end * 1000);
     user.subscriptionActivatedAt = new Date();
-    await user.save();
+    await user.save(); // ✅ ADDED AWAIT
 
-    // ✅ UPDATE SUBSCRIPTION RECORD - USE findOneAndUpdate WITHOUT upsert
-    await Subscription.findOneAndUpdate(
+    // ✅ UPDATE SUBSCRIPTION RECORD - ADD AWAIT
+    await Subscription.findOneAndUpdate( // ✅ ALREADY HAS AWAIT
       { 
         userId: user._id,
         stripeSubscriptionId: stripeSubscription.id 
@@ -1216,10 +1216,52 @@ export const verifyCheckoutSession = async (req, res) => {
         currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
         activatedAt: new Date(),
       }
-      // ❌ REMOVE { upsert: true } - This causes duplicate key error
     );
 
-    // ... rest of your code ...
+    // ✅ ADD THESE AWAITS FOR LOGGING AND NOTIFICATION
+    await logSubscriptionLifecycle( // ✅ ADDED AWAIT
+      'PAYMENT_INTENT_VERIFIED',
+      {
+        paymentIntentId,
+        subscriptionId: stripeSubscription.id,
+        planType: detectedPlanType
+      },
+      user,
+      { apiSource: 'success-payment' }
+    );
+
+    await notifyUser( // ✅ ADDED AWAIT
+      user,
+      "Subscription Activated 🎉",
+      `Your ${detectedPlanType} subscription is now active! Auto-renewal is enabled.`,
+      {
+        deeplink: "/subscription",
+        data: {
+          action: "subscription_activated",
+          subscriptionId: stripeSubscription.id,
+          planType: detectedPlanType
+        },
+      }
+    );
+
+    console.log(`✅ [FLUTTER_PAYMENT] Subscription activated via payment intent: ${stripeSubscription.id}`);
+
+    // ✅ RETURN RESPONSE IMMEDIATELY
+    return successResponse(res, "Subscription activated successfully!", {
+      subscription: {
+        id: stripeSubscription.id,
+        status: "active",
+        planType: detectedPlanType,
+        startDate: new Date(stripeSubscription.current_period_start * 1000),
+        endDate: new Date(stripeSubscription.current_period_end * 1000),
+        isAutoRenew: true,
+      },
+      user: {
+        isSubscription: true,
+        subscriptionType: detectedPlanType,
+      }
+    });
+
   } catch (error) {
     console.error("❌ [FLUTTER_PAYMENT] Error:", error);
     
