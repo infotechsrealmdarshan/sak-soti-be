@@ -11,6 +11,28 @@ import { sendFirebaseNotification } from "../../utils/firebaseHelper.js";
 import Notification from "../../models/Notification.js";
 import { checkUserDeleted } from "../../utils/chatHelper.js";
 
+const deleteRedisKeysByPattern = async (pattern) => {
+  if (!redisClient || typeof redisClient.scan !== "function") return;
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, keys] = await redisClient.scan(
+        cursor,
+        "MATCH",
+        pattern,
+        "COUNT",
+        50
+      );
+      cursor = nextCursor;
+      if (Array.isArray(keys) && keys.length > 0) {
+        await redisClient.del(...keys);
+      }
+    } while (cursor !== "0");
+  } catch (err) {
+    console.warn(`⚠️ Failed to delete Redis keys for pattern ${pattern}:`, err.message);
+  }
+};
+
 // Minimal in-memory websocket-like message save via HTTP for individual chats
 export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
   const { chatId } = req.params; // ChatRequest ID
@@ -54,8 +76,6 @@ export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
     { upsert: true, new: true }
   ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
   const last = convo.messages[convo.messages.length - 1];
-  const ts = formatMessageTimestamp(last.createdAt || Date.now());
-  const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
   // ✅ Handle deleted users in sender info
   // If partner is deleted, show "Profile Deleted" as sender info
@@ -101,7 +121,7 @@ export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
     mediaUrl: last.mediaUrl || null,
     messageType: last.messageType || 'text',
     createdAt: last.createdAt,
-    time: displayTime,
+    time: last.createdAt,
     sender: senderInfo,
     type: 'send'
   };
@@ -169,8 +189,6 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
     ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
 
     const last = convo.messages[convo.messages.length - 1];
-    const ts = formatMessageTimestamp(last.createdAt || Date.now());
-    const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
     // ✅ Handle deleted users in sender info
     // If partner is deleted, show "Profile Deleted" as sender info
@@ -216,34 +234,47 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
       mediaUrl: last.mediaUrl || null,
       messageType: last.messageType || 'text',
       createdAt: last.createdAt,
-      time: displayTime,
+      time: last.createdAt,
       sender: senderInfo
     };
     const senderChatListMessage = { ...baseMessageData, type: 'send' };
     const receiverChatListMessage = { ...baseMessageData, type: 'receive' };
 
     // ✅ EMIT SOCKET EVENT TO CHAT ROOM
+    // In your sendChatMessage function, after saving the message:
     try {
       const io = getIO();
 
-      // Emit to chat room (both participants will receive)
-      io.to(`chat:${chatId}`).emit("newMessage", {
+      // Emit to chat room for real-time message display
+      io.to(`chat:${String(chatId)}`).emit("newMessage", {
         ...baseMessageData,
         chatId: String(chatId),
         type: 'receive',
         sender: senderInfo
       });
 
-      // ✅ Stop typing indicator when message is sent
-      io.to(`chat:${chatId}`).emit("userTyping", {
-        chatId: String(chatId),
-        userId: String(userId),
-        isTyping: false
-      });
+      // Emit chat list update to all participants
+      if (reqDoc.chatType === "individual") {
+        const otherUserId = String(reqDoc.senderId) === String(userId)
+          ? String(reqDoc.receiverId)
+          : String(reqDoc.senderId);
 
-      console.log(`📨 Message sent to individual chat room: chat:${chatId}`);
+        io.to(`user:${userId}`).emit("chatList:update", {
+          chatId: String(chatId),
+          action: "newMessage",
+          lastMessage: { ...baseMessageData, type: 'send' }
+        });
+
+        io.to(`user:${otherUserId}`).emit("chatList:update", {
+          chatId: String(chatId),
+          action: "newMessage",
+          lastMessage: { ...baseMessageData, type: 'receive' }
+        });
+      }
+
+      console.log(`✅ Socket events emitted for new message in chat: ${chatId}`);
     } catch (error) {
-      console.error("Socket emit error (individual chat):", error.message);
+      console.error("❌ Socket emit error:", error.message);
     }
 
     // ✅ EMIT SOCKET EVENT TO UPDATE CHAT LIST FOR BOTH USERS
@@ -324,11 +355,11 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
 
     // Clear cache for both users
     try {
-      await redisClient.del([
+      await redisClient.del(
         `chat:${String(reqDoc._id)}`,
         `requests:${String(reqDoc.senderId)}:accepted`,
         `requests:${String(reqDoc.receiverId)}:accepted`
-      ]);
+      );
     } catch { }
 
     return successResponse(res, 'Message sent', senderChatListMessage, null, 200, 1);
@@ -363,8 +394,6 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
     await groupRoot.save();
   } catch { }
   const last = convo.messages[convo.messages.length - 1];
-  const ts = formatMessageTimestamp(last.createdAt || Date.now());
-  const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
   // ✅ Handle deleted users in sender info
   let senderInfo;
@@ -399,14 +428,22 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
     mediaUrl: last.mediaUrl || null,
     messageType: last.messageType || 'text',
     createdAt: last.createdAt,
-    time: displayTime,
+    time: last.createdAt,
     sender: senderInfo
   };
 
   // Emit socket event to chat room for real-time notifications
   try {
     const io = getIO();
-
+    const lastMessageTimestamp = last.createdAt || groupRoot.updatedAt || new Date();
+    const updatedAtIso = (groupRoot.updatedAt || new Date()).toISOString();
+    const baseChatListPayload = {
+      chatId: String(groupRoot._id),
+      action: "newMessage",
+      type: "group",
+      lastMessageTimestamp,
+      updatedAt: updatedAtIso
+    };
     // Emit to chat room (clients subscribed via GET will receive)
     io.to(`chat:${String(groupRoot._id)}`).emit("newMessage", {
       ...baseGroupMessage,
@@ -427,23 +464,16 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
       String(groupRoot.groupAdmin),
       ...(groupRoot.superAdmins || []).map(String),
       ...(groupRoot.members || []).map(String)
-    ].filter(id => id !== String(userId));
+    ];
 
-    allGroupMemberIds.forEach(memberId => {
+    const uniqueGroupMemberIds = Array.from(new Set(allGroupMemberIds));
+
+    uniqueGroupMemberIds.forEach(memberId => {
+      const messageType = String(memberId) === String(userId) ? 'send' : 'receive';
       io.to(`user:${memberId}`).emit("chatList:update", {
-        chatId: String(groupRoot._id),
-        action: "newMessage",
-        lastMessage: { ...baseGroupMessage, type: 'receive' },
-        type: "group"
+        ...baseChatListPayload,
+        lastMessage: { ...baseGroupMessage, type: messageType }
       });
-    });
-
-    // Also emit to sender
-    io.to(`user:${userId}`).emit("chatList:update", {
-      chatId: String(groupRoot._id),
-      action: "newMessage",
-      lastMessage: { ...baseGroupMessage, type: 'send' },
-      type: "group"
     });
 
     console.log(`🔔 Chat list update sent to all group members for group ${groupRoot._id}`);
@@ -493,7 +523,23 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
     console.error("❌ Error sending group notification:", err.message);
   }
 
-  try { await redisClient.del([`chat:${String(groupRoot._id)}`]); } catch { }
+  try { await redisClient.del(`chat:${String(groupRoot._id)}`); } catch { }
+
+  try {
+    const cacheClearTargets = [
+      String(groupRoot.groupAdmin),
+      ...(groupRoot.superAdmins || []).map(String),
+      ...(groupRoot.members || []).map(String)
+    ];
+    const uniqueTargets = Array.from(new Set(cacheClearTargets));
+    await Promise.all(uniqueTargets.map(async (uid) => {
+      await deleteRedisKeysByPattern(`requests:${uid}:group*`);
+      await deleteRedisKeysByPattern(`requests:${uid}:accepted*`);
+    }));
+  } catch (err) {
+    console.warn("⚠️ Redis group cache clear failed:", err.message);
+  }
+
   return successResponse(res, 'Message sent', { ...baseGroupMessage, type: 'send' }, null, 200, 1);
 });
 
@@ -564,8 +610,6 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
   ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
 
   const last = convo.messages[convo.messages.length - 1];
-  const ts = formatMessageTimestamp(last.createdAt || Date.now());
-  const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
   // ✅ Handle deleted users in sender info
   // If partner is deleted (for individual chats), show "Profile Deleted" as sender info
@@ -611,7 +655,7 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
     mediaUrl: last.mediaUrl,
     messageType: last.messageType,
     createdAt: last.createdAt,
-    time: displayTime,
+    time: last.createdAt,
     sender: senderInfo
   };
 
@@ -831,7 +875,7 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
   } catch (err) {
     console.error("❌ Error sending media notification:", err.message);
   }
-  try { await redisClient.del([`chat:${String(chatKeyId)}`]); } catch { }
+  try { await redisClient.del(`chat:${String(chatKeyId)}`); } catch { }
   return successResponse(res, 'Message sent', { ...baseMessageData, type: 'send' }, null, 200, 1);
 });
 
@@ -877,7 +921,6 @@ export const getIndividualMessages = asyncHandler(async (req, res) => {
 
   const messages = (convo?.messages || []).map(m => {
     const ts = formatMessageTimestamp(m.createdAt || Date.now());
-    const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
     // ✅ READ DELETION FLAGS FROM DATABASE
     const isDeleteEvery = m.isDeleteEvery === true;
@@ -898,7 +941,7 @@ export const getIndividualMessages = asyncHandler(async (req, res) => {
       isDeleteMe: isDeleteMe,
       deletedAt: m.deletedAt || null,
       createdAt: m.createdAt,
-      time: displayTime,
+      time: last.createdAt,
       sender: m.sender?._id ? (m.sender.isDeleted === true ? {
         _id: String(m.sender._id),
         firstname: "Profile",
@@ -935,7 +978,9 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
-  const cacheKey = `chat:${String(chatId)}:user:${String(userId)}:page:${page}:limit:${limit}:search:${search}`;
+  // ✅ FIXED: Include timestamp in cache key to avoid stale data
+  const cacheKey = `chat:${String(chatId)}:user:${String(userId)}:page:${page}:limit:${limit}:search:${search}:${Date.now()}`;
+
   const cached = await redisClient.get(cacheKey);
   if (cached) {
     const parsed = JSON.parse(cached);
@@ -977,12 +1022,10 @@ export const getChatMessages = asyncHandler(async (req, res) => {
 
     let messages = (convo?.messages || []).map(m => {
       const ts = formatMessageTimestamp(m.createdAt || Date.now());
-      const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
       // ✅ READ DELETION FLAGS FROM DATABASE
       const isDeleteEvery = m.isDeleteEvery === true;
       // ✅ USER-SPECIFIC DELETION: Only check deletedForMe array (not global isDeleteMe flag)
-      // isDeleteMe on message is a global flag, deletedForMe is user-specific
       const isDeleteMe = deletedForMeMap.has(m._id.toString());
 
       // If message is deleted for me (current user), don't include it in response
@@ -995,7 +1038,6 @@ export const getChatMessages = asyncHandler(async (req, res) => {
         content: isDeleteEvery ? "This message has been deleted" : m.content,
         mediaUrl: isDeleteEvery ? null : m.mediaUrl,
         messageType: isDeleteEvery ? "text" : m.messageType,
-        // NEW: Read flags from database
         isDeleteMe: isDeleteMe,
         isDeleteEvery: isDeleteEvery,
         deletedAt: m.deletedAt || null,
@@ -1009,7 +1051,7 @@ export const getChatMessages = asyncHandler(async (req, res) => {
         createdAt: m.createdAt,
         isEdited: m.isEdited || false,
         editedAt: m.editedAt || null,
-        time: displayTime,
+        time: last.createdAt,
         sender: m.sender?._id ? (m.sender.isDeleted === true ? {
           _id: String(m.sender._id),
           firstname: "Profile",
@@ -1039,11 +1081,13 @@ export const getChatMessages = asyncHandler(async (req, res) => {
       });
     }
 
-    // Sort and paginate
+    // ✅ FIXED: Sort by createdAt DESCENDING (latest first)
     messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
     const totalMessages = messages.length;
+
+    // ✅ FIXED: Use normal pagination for latest messages first
     const paginatedMessages = messages.slice(skip, skip + limit);
-    paginatedMessages.reverse();
 
     const pagination = {
       currentPage: page,
@@ -1054,11 +1098,14 @@ export const getChatMessages = asyncHandler(async (req, res) => {
 
     const data = { chatRequestId: chatId, messages: paginatedMessages };
     const responseData = { message: "Messages fetched", data, pagination };
-    try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
+
+    // ✅ FIXED: Reduce cache time to 10 seconds for real-time updates
+    try { await redisClient.setEx(cacheKey, 10, JSON.stringify(responseData)); } catch { }
+
     return successResponse(res, "Messages fetched", data, pagination, 200, 1);
   }
 
-  // Group chat (similar logic as individual)
+  // Group chat - FIXED with same logic as individual
   const groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({ _id: reqDoc.groupId, chatType: 'group', receiverId: null });
   if (!groupRoot) return successResponse(res, "Group id not found", null, null, 200, 0);
 
@@ -1101,12 +1148,10 @@ export const getChatMessages = asyncHandler(async (req, res) => {
 
   let messages = (convo?.messages || []).map(m => {
     const ts = formatMessageTimestamp(m.createdAt || Date.now());
-    const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
     // ✅ READ DELETION FLAGS FROM DATABASE
     const isDeleteEvery = m.isDeleteEvery === true;
     // ✅ USER-SPECIFIC DELETION: Only check deletedForMe array (not global isDeleteMe flag)
-    // isDeleteMe on message is a global flag, deletedForMe is user-specific
     const isDeleteMe = deletedForMeMap.has(m._id.toString());
 
     // If message is deleted for me (current user), don't include it in response
@@ -1124,7 +1169,6 @@ export const getChatMessages = asyncHandler(async (req, res) => {
       content: isDeleteEvery ? "This message has been deleted" : m.content,
       mediaUrl: isDeleteEvery ? null : m.mediaUrl,
       messageType: isDeleteEvery ? "text" : m.messageType,
-      // NEW: Read flags from database
       isDeleteMe: isDeleteMe,
       isDeleteEvery: isDeleteEvery,
       deletedAt: m.deletedAt || null,
@@ -1138,7 +1182,7 @@ export const getChatMessages = asyncHandler(async (req, res) => {
       createdAt: m.createdAt,
       isEdited: m.isEdited || false,
       editedAt: m.editedAt || null,
-      time: displayTime,
+      time: ts,
       sender: m.sender?._id ? (m.sender.isDeleted === true ? {
         _id: String(m.sender._id),
         firstname: "Profile",
@@ -1168,11 +1212,13 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     });
   }
 
-  // Sort and paginate
+  // ✅ FIXED: Sort by createdAt DESCENDING (latest first) - SAME AS INDIVIDUAL
   messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
   const totalMessages = messages.length;
+
+  // ✅ FIXED: Use normal pagination for latest messages first - SAME AS INDIVIDUAL
   const paginatedMessages = messages.slice(skip, skip + limit);
-  paginatedMessages.reverse();
 
   const pagination = {
     currentPage: page,
@@ -1187,6 +1233,9 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     messages: paginatedMessages
   };
   const responseData = { message: "Messages fetched", data, pagination };
-  try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
+
+  // ✅ FIXED: Reduce cache time to 10 seconds for real-time updates
+  try { await redisClient.setEx(cacheKey, 10, JSON.stringify(responseData)); } catch { }
+
   return successResponse(res, "Messages fetched", data, pagination, 200, 1);
 });

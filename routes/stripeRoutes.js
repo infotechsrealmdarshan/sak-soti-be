@@ -10,6 +10,7 @@ import {
   getSubscriptionById,
   selectPlan,
   verifyCheckoutSession,
+  getUserTransactionsAdmin,
 } from "../controller/stripeController.js";
 import { adminOnly } from "../middlewares/role.js";
 
@@ -160,13 +161,44 @@ router.get("/list", auth, getUserSubscriptions);
  *   get:
  *     tags: [Subscription]
  *     summary: Get all subscriptions (admin)
+ *     description: Get paginated list of all subscriptions with search and sorting
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: perPage
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 10
+ *         description: Number of items per page
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search across subscription ID, customer ID, plan type, status, user name, or email
+ *       - in: query
+ *         name: sort
+ *         schema:
+ *           type: string
+ *           enum: [asc, desc]
+ *           default: desc
+ *         description: Sort order by creation date
  *     responses:
  *       200:
  *         description: Subscriptions fetched successfully
  *       403:
  *         description: Admin access required
+ *       500:
+ *         description: Internal server error
  */
 router.get("/admin/list", auth, adminOnly, getAllSubscriptionsAdmin);
 
@@ -217,5 +249,42 @@ router.get("/admin/:subscriptionId", auth, adminOnly, getSubscriptionById);
  *         description: Error canceling subscription
  */
 router.delete("/cancel", auth, cancelSubscription);
+
+/**
+ * @swagger
+ * /api/subscription/admin/user/{userId}/transactions:
+ *   get:
+ *     tags: [Subscription]
+ *     summary: Get all transactions for a specific user (Admin only)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: User ID to fetch transactions for
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of transactions per page
+ *     responses:
+ *       200:
+ *         description: User transactions fetched successfully
+ *       403:
+ *         description: Admin access required
+ *       404:
+ *         description: User not found
+ */
+router.get("/admin/user/:userId/transactions", auth, adminOnly, getUserTransactionsAdmin);
 
 export default router;

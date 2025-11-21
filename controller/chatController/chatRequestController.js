@@ -16,39 +16,40 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
   const senderId = req.user?.id;
   const { postId } = req.body;
 
-  if (!senderId) return errorResponse(res, "Unauthorized", 404);
-  if (!postId) return errorResponse(res, "postId is required", 404);
+  if (!senderId) return errorResponse(res, "Unauthorized", 401);
+  if (!postId) return errorResponse(res, "postId is required", 400);
 
   // ✅ Validate ObjectId
   if (!mongoose.Types.ObjectId.isValid(postId)) {
-    return successResponse(res, "Post id not found", null, null, 200, 0);
+    return errorResponse(res, "Post id not found", 404);
   }
 
   const post = await Post.findById(postId).populate({ path: "author", select: "_id" });
-  if (!post) return successResponse(res, "Post id not found", null, null, 200, 0);
+  if (!post) return errorResponse(res, "Post id not found", 404);
 
   const receiverId = post.author?._id?.toString();
   if (!receiverId)
-    return successResponse(res, "Receiver user not found for post", null, null, 200, 0);
+    return errorResponse(res, "Receiver user not found for post", 404);
   if (String(senderId) === String(receiverId))
-    return errorResponse(res, "You cannot send request to your own user", 404);
+    return errorResponse(res, "You cannot send request to your own user", 400);
 
   const sender = req.user;
   const receiver = await User.findById(receiverId).select(
     "firstname lastname email isSubscription isAdmin fcmToken"
   );
-  if (!receiver) return successResponse(res, "Receiver not found", null, null, 200, 0);
+  if (!receiver) return errorResponse(res, "Receiver not found", 404);
 
-  const senderAllowed = !!(sender && (sender.isSubscription || sender.isAdmin));
-  const receiverAllowed = !!(receiver && (receiver.isSubscription || receiver.isAdmin));
-  if (!senderAllowed || !receiverAllowed) {
-    return successResponse(
+  // ✅ FIX: Check ONLY current user (sender) subscription
+  if (!sender) return errorResponse(res, "Sender not found", 404);
+
+  const senderAllowed = !!(sender.isSubscription || sender.isAdmin);
+
+  // ✅ FIX: Only check sender subscription, NOT receiver
+  if (!senderAllowed) {
+    return errorResponse(
       res,
-      "Both users must have an active subscription (or be an admin) to use chat",
-      null,
-      null,
-      200,
-      0
+      "You must have an active subscription (or be an admin) to send chat requests",
+      403
     );
   }
 
@@ -59,8 +60,9 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
     chatType,
     status: "pending",
   });
+
   if (existing)
-    return successResponse(res, "A pending request already exists", null, null, 200, 0);
+    return errorResponse(res, "A pending request already exists", 409);
 
   const request = await ChatRequest.create({ senderId, receiverId, chatType });
 
@@ -97,21 +99,10 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
   // ✅ Create and send notification
   try {
     const title = "Receive new request!";
-    const sender = await User.findById(senderId).select("firstname lastname email");
-    console.log("Sender info for notification:", sender.firstname, sender.lastname);
-    const senderName = `${sender.firstname || ""} ${sender.lastname || ""}`.trim() || sender.email;
+    const senderForNotification = await User.findById(senderId).select("firstname lastname email");
+    console.log("Sender info for notification:", senderForNotification.firstname, senderForNotification.lastname);
+    const senderName = `${senderForNotification.firstname || ""} ${senderForNotification.lastname || ""}`.trim() || senderForNotification.email;
     const message = `${senderName} wants to start a chat with you.`;
-
-    // DEBUG: Check the actual token in database
-    console.log("🔍 DEBUG - Checking receiver FCM token:");
-    console.log("Receiver ID:", receiverId);
-    console.log("Receiver FCM Token from DB:", receiver.fcmToken);
-    console.log("Token exists:", !!receiver.fcmToken);
-
-    if (receiver.fcmToken) {
-      console.log("Token length:", receiver.fcmToken.length);
-      console.log("Token starts with:", receiver.fcmToken.substring(0, 20) + "...");
-    }
 
     // 1️⃣ Save to DB
     const notification = await Notification.create({
@@ -172,7 +163,7 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
-    return successResponse(res, "Invalid chat request ID", null, null, 200, 0);
+    return errorResponse(res, "Invalid chat request ID", 400);
   }
 
   if (!["accept", "reject"].includes(action)) {
@@ -181,15 +172,31 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
 
   const request = await ChatRequest.findById(id);
   if (!request) {
-    return successResponse(res, "Chat request not found", null, null, 200, 0);
+    return errorResponse(res, "Chat request not found", 404);
   }
 
   if (String(request.receiverId) !== String(userId)) {
     return errorResponse(res, "Only the receiver can act on this request", 403);
   }
 
-  const sender = await User.findById(request.senderId).select("firstname lastname email fcmToken");
-  const receiver = await User.findById(request.receiverId).select("firstname lastname email fcmToken");
+  const sender = await User.findById(request.senderId).select("firstname lastname email fcmToken isSubscription isAdmin");
+  const receiver = await User.findById(request.receiverId).select("firstname lastname email fcmToken isSubscription isAdmin");
+
+  if (!sender || !receiver) {
+    return errorResponse(res, "User not found", 404);
+  }
+
+  // ✅ FIX: Check ONLY current user (receiver) subscription
+  const receiverAllowed = !!(receiver.isSubscription || receiver.isAdmin);
+
+  // ✅ FIX: Only check receiver subscription, NOT sender
+  if (!receiverAllowed) {
+    return errorResponse(
+      res,
+      "You must have an active subscription (or be an admin) to accept/reject chat requests",
+      403
+    );
+  }
 
   const receiverName =
     `${receiver.firstname || ""} ${receiver.lastname || ""}`.trim() || receiver.email;
@@ -419,6 +426,20 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
 
 export const getMyReceivedRequests = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
+
+  // ✅ ADD: Check user subscription
+  const user = await User.findById(userId).select("isSubscription isAdmin");
+  if (!user) return errorResponse(res, "User not found", 404);
+
+  const userAllowed = !!(user.isSubscription || user.isAdmin);
+  if (!userAllowed) {
+    return errorResponse(
+      res,
+      "You must have an active subscription (or be an admin) to view chat requests",
+      403
+    );
+  }
+
   const requests = await ChatRequest.find({ receiverId: userId, status: "pending" })
     .populate([
       { path: "senderId", select: "firstname lastname email" },
@@ -430,6 +451,20 @@ export const getMyReceivedRequests = asyncHandler(async (req, res) => {
 
 export const getMySentRequests = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
+
+  // ✅ ADD: Check user subscription
+  const user = await User.findById(userId).select("isSubscription isAdmin");
+  if (!user) return errorResponse(res, "User not found", 404);
+
+  const userAllowed = !!(user.isSubscription || user.isAdmin);
+  if (!userAllowed) {
+    return errorResponse(
+      res,
+      "You must have an active subscription (or be an admin) to view chat requests",
+      403
+    );
+  }
+
   const requests = await ChatRequest.find({ senderId: userId, status: "pending" })
     .populate([
       { path: "senderId", select: "firstname lastname email" },
@@ -441,6 +476,20 @@ export const getMySentRequests = asyncHandler(async (req, res) => {
 
 export const getMyAcceptedRequests = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
+
+  // ✅ ADD: Check user subscription
+  const user = await User.findById(userId).select("isSubscription isAdmin");
+  if (!user) return errorResponse(res, "User not found", 404);
+
+  const userAllowed = !!(user.isSubscription || user.isAdmin);
+  if (!userAllowed) {
+    return errorResponse(
+      res,
+      "You must have an active subscription (or be an admin) to view chat requests",
+      403
+    );
+  }
+
   const requests = await ChatRequest.find({
     status: "accepted",
     $or: [{ senderId: userId }, { receiverId: userId }]
@@ -466,9 +515,21 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
     return errorResponse(res, "type must be one of: received, sent, accepted, group", 404);
   }
 
+  const user = await User.findById(userId).select("isSubscription isAdmin");
+  if (!user) return errorResponse(res, "User not found", 404);
+
   const pickLastVisibleMessageForUser = (conversation) => {
     if (!conversation || !Array.isArray(conversation.messages)) {
       return { lastMessage: null, lastMessageTimestamp: null };
+    }
+
+    const userAllowed = !!(user.isSubscription || user.isAdmin);
+    if (!userAllowed) {
+      return errorResponse(
+        res,
+        "You must have an active subscription (or be an admin) to view chat requests",
+        403
+      );
     }
 
     const deletedForCurrentUser = new Set();
@@ -507,17 +568,17 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
 
       const senderInfo = msg.sender?._id
         ? {
-            _id: String(msg.sender._id),
-            firstname: msg.sender.firstname,
-            lastname: msg.sender.lastname,
-            email: msg.sender.email,
-            profileimg: msg.sender.profileimg,
-          }
+          _id: String(msg.sender._id),
+          firstname: msg.sender.firstname,
+          lastname: msg.sender.lastname,
+          email: msg.sender.email,
+          profileimg: msg.sender.profileimg,
+        }
         : msg.sender
-        ? {
+          ? {
             _id: String(msg.sender),
           }
-        : null;
+          : null;
 
       const isCurrentUserSender =
         senderIdStr && String(senderIdStr) === String(userId);
@@ -598,10 +659,10 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
           return true;
         });
-        
+
         // If deleted users were found, remove them from the group
         if (deletedMemberIds.length > 0) {
-          const deletedObjectIds = deletedMemberIds.map(id => 
+          const deletedObjectIds = deletedMemberIds.map(id =>
             mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
           );
           await ChatRequest.findByIdAndUpdate(group._id, {
@@ -613,7 +674,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           });
         }
       }
-      
+
       // Filter deleted users from superAdmins
       if (group.superAdmins && Array.isArray(group.superAdmins)) {
         const deletedAdminIds = [];
@@ -624,9 +685,9 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
           return true;
         });
-        
+
         if (deletedAdminIds.length > 0) {
-          const deletedObjectIds = deletedAdminIds.map(id => 
+          const deletedObjectIds = deletedAdminIds.map(id =>
             mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
           );
           await ChatRequest.findByIdAndUpdate(group._id, {
@@ -637,7 +698,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
 
       validGroups.push(group);
     }
-    
+
     // Replace groups array with valid groups only
     groups.length = 0;
     groups.push(...validGroups);

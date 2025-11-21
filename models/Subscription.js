@@ -12,7 +12,6 @@ const subscriptionSchema = new mongoose.Schema(
     stripeSubscriptionId: { type: String, required: true, unique: true },
     stripePaymentIntentId: { type: String },
     priceId: { type: String, required: true },
-
     amount: { type: Number, required: true },
     currency: { type: String, required: true, uppercase: true, default: "USD" },
 
@@ -40,6 +39,9 @@ const subscriptionSchema = new mongoose.Schema(
     startDate: { type: Date, required: true },
     endDate: { type: Date, required: true },
     canceledAt: { type: Date, default: null },
+    isSubscriptionCancelled: { type: Boolean, default: false },
+    isRenewalEntry: { type: Boolean, default: false },
+    originalSubscriptionId: { type: String },
   },
   { timestamps: true }
 );

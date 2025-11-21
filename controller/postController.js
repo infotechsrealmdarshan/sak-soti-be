@@ -197,7 +197,7 @@ export const deletePost = asyncHandler(async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* 📌 GET ALL POSTS                                                           */
+/* 📌 GET ALL POSTS - Simple Fixed Version                                   */
 /* -------------------------------------------------------------------------- */
 export const getAllPosts = asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
@@ -207,32 +207,29 @@ export const getAllPosts = asyncHandler(async (req, res) => {
   const order = req.query.order === "asc" ? 1 : -1;
   const skip = (page - 1) * limit;
 
-  // ✅ Only fetch posts that are NOT deleted
-  const query = { isDeleted: { $ne: true } };
-
-  // ✅ Add search support if needed
-  if (search) {
-    query.$or = [{ description: { $regex: search, $options: "i" } }];
-  }
-
-  // ✅ Count total active (non-deleted) posts
-  const totalPosts = await Post.countDocuments(query);
-
-  // ✅ Fetch posts and populate author info
-  const posts = await Post.find(query)
+  // ✅ First get all posts with authors
+  const posts = await Post.find({ isDeleted: { $ne: true } })
     .populate("author", "firstname lastname email country profileimg isAdmin isDeleted")
     .sort({ [orderBy]: order })
     .skip(skip)
     .limit(limit);
 
-  // ✅ Extra safety: filter out posts from deleted authors (optional)
-  const visiblePosts = posts.filter((post) => !post.author?.isDeleted);
+  // ✅ Filter out posts from deleted authors
+  const visiblePosts = posts.filter((post) => post.author && !post.author.isDeleted);
+
+  // ✅ Get accurate count by counting all non-deleted posts with non-deleted authors
+  const allPosts = await Post.find({ isDeleted: { $ne: true } })
+    .populate("author", "isDeleted");
+  
+  const totalPosts = allPosts.filter(post => post.author && !post.author.isDeleted).length;
 
   const pagination = {
     currentPage: page,
     totalPages: Math.ceil(totalPosts / limit),
     totalItems: totalPosts,
     itemsPerPage: limit,
+    hasNextPage: page < Math.ceil(totalPosts / limit),
+    hasPrevPage: page > 1,
   };
 
   return successResponse(
@@ -244,7 +241,6 @@ export const getAllPosts = asyncHandler(async (req, res) => {
     1
   );
 });
-
 /* -------------------------------------------------------------------------- */
 /* 📌 GET POST BY ID                                                          */
 /* -------------------------------------------------------------------------- */

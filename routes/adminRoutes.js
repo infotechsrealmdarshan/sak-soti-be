@@ -1,14 +1,14 @@
 import express from "express";
 import auth from "../middlewares/auth.js";
-import { 
+import {
   getAllUsers,
   getUserById,
   createUser,
   updateUser,
   updateUserStatus,
-  deleteUser
+  deleteUser,
 } from "../controller/adminController.js";
-import { adminOnly } from "../middlewares/role.js"; 
+import { adminOnly } from "../middlewares/role.js";
 import { getAdminAnalytics } from "../controller/adminAnalyticsController.js";
 import { bulkDeleteUsers } from "../controller/userController.js";
 
@@ -40,6 +40,13 @@ const router = express.Router();
  *         schema:
  *           type: string
  *         description: Search in firstname, lastname, or email (case-insensitive)
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [all, active, inactive, deleted]
+ *           default: all
+ *         description: Filter users by status
  *       - in: query
  *         name: orderBy
  *         schema:
@@ -247,7 +254,6 @@ router.delete("/users/:id", auth, adminOnly, deleteUser);
  *         description: API logic issue - token missing or invalid
  */
 router.get("/analytics", auth, adminOnly, getAdminAnalytics);
-
 
 
 export default router;
