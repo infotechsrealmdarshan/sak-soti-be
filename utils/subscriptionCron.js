@@ -1,5 +1,6 @@
 import User from "../models/User.js";
 import redisClient from "../config/redis.js";
+import Subscription from "../models/Subscription.js"; // Add this import
 
 /**
  * Check and update expired subscriptions
