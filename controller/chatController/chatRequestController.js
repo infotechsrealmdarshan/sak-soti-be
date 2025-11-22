@@ -555,15 +555,18 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       }
     }
 
+    // ✅ FIXED: Find the last visible message (same logic as before)
     for (let idx = conversation.messages.length - 1; idx >= 0; idx -= 1) {
       const msg = conversation.messages[idx];
       if (!msg) continue;
 
-      const msgId = String(msg._id);
+      const msgIdStr = String(msg._id);
       const rawSenderId = msg.sender?._id ? msg.sender._id : msg.sender;
       const senderIdStr = rawSenderId ? String(rawSenderId) : null;
+
+      // Skip if message is deleted
       if (msg.isDeleteEvery === true) continue;
-      if (deletedForCurrentUser.has(msgId)) continue;
+      if (deletedForCurrentUser.has(msgIdStr)) continue;
       if (joinedAtDate && new Date(msg.createdAt) < joinedAtDate) continue;
 
       const senderInfo = msg.sender?._id
@@ -580,12 +583,11 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
           : null;
 
-      const isCurrentUserSender =
-        senderIdStr && String(senderIdStr) === String(userId);
+      const isCurrentUserSender = senderIdStr && String(senderIdStr) === String(userId);
 
       return {
         lastMessage: {
-          _id: msgId,
+          _id: msgIdStr,
           chatRequestId: conversation.chatRequestId
             ? String(conversation.chatRequestId)
             : null,
@@ -767,41 +769,34 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
             let count = 0;
 
             if (lastReadAt) {
-              count = convo.messages.reduce(
-                (acc, m) => {
-                  if (!m) return acc;
-                  const msgIdStr = String(m._id);
-                  const isRemovedForEveryone = m.isDeleteEvery === true;
-                  const isRemovedForCurrentUser =
-                    String(uid) === String(userId) && deletedForCurrentUser.has(msgIdStr);
-
-                  if (isRemovedForEveryone || isRemovedForCurrentUser) {
-                    return acc;
-                  }
-
-                  if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
-                    return acc;
-                  }
-
-                  return acc + (new Date(m.createdAt) > new Date(lastReadAt) ? 1 : 0);
-                },
-                0
-              );
-            } else {
+              const lastReadDate = new Date(lastReadAt);
               count = convo.messages.reduce((acc, m) => {
                 if (!m) return acc;
+
                 const msgIdStr = String(m._id);
-                const isRemovedForEveryone = m.isDeleteEvery === true;
-                const isRemovedForCurrentUser =
-                  String(uid) === String(userId) && deletedForCurrentUser.has(msgIdStr);
+                const msgDate = new Date(m.createdAt);
 
-                if (isRemovedForEveryone || isRemovedForCurrentUser) {
-                  return acc;
-                }
+                // Skip if message is deleted
+                if (m.isDeleteEvery === true) return acc;
+                if (deletedForCurrentUser.has(msgIdStr)) return acc;
+                if (joinedAtDate && msgDate < joinedAtDate) return acc;
 
-                if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
-                  return acc;
-                }
+                // ✅ FIX: Only count if message is after last read time
+                return acc + (msgDate > lastReadDate ? 1 : 0);
+              }, 0);
+            } else {
+              // If no lastReadAt, count all visible messages as unread
+              count = convo.messages.reduce((acc, m) => {
+                if (!m) return acc;
+
+                const msgIdStr = String(m._id);
+                const msgDate = new Date(m.createdAt);
+
+                // Skip if message is deleted
+                if (m.isDeleteEvery === true) return acc;
+                if (deletedForCurrentUser.has(msgIdStr)) return acc;
+                if (joinedAtDate && msgDate < joinedAtDate) return acc;
+
                 return acc + 1;
               }, 0);
             }
@@ -980,6 +975,14 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
             };
           }
 
+          if (type === "accepted" && obj.chatType === "individual") {
+            // Determine who is the partner (the other user in the chat)
+            const isCurrentUserSender = String(obj.senderId._id) === String(userId);
+            obj.partnerInfo = isCurrentUserSender ? obj.receiverId : obj.senderId;
+            obj.partnerInfo.lastSeen = new Date(); // You can add actual last seen data
+          }
+
+
           let unreadCount = 0;
           let lastMessage = null;
           let lastMessageTimestamp = null;
@@ -1004,24 +1007,36 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
                 });
               }
 
-              const isVisibleMessage = (m) => {
-                if (!m) return false;
-                const msgIdStr = String(m._id);
-                if (m.isDeleteEvery === true) return false;
-                if (deletedForCurrentUser.has(msgIdStr)) return false;
-                return true;
-              };
-
-              const visibleMessages = convo.messages.filter(isVisibleMessage);
-
-              // ✅ Calculate unread count for current user
+              // ✅ FIXED: Calculate unread count correctly (only messages after lastReadAt)
               if (lastReadAt) {
                 const lastReadDate = new Date(lastReadAt);
-                unreadCount = visibleMessages.reduce((acc, m) => {
-                  return acc + (new Date(m.createdAt) > lastReadDate ? 1 : 0);
+                unreadCount = convo.messages.reduce((acc, m) => {
+                  if (!m) return acc;
+
+                  const msgIdStr = String(m._id);
+                  const msgDate = new Date(m.createdAt);
+
+                  // Skip if message is deleted
+                  if (m.isDeleteEvery === true) return acc;
+                  if (deletedForCurrentUser.has(msgIdStr)) return acc;
+
+                  // ✅ FIX: Only count if message is after last read time
+                  return acc + (msgDate > lastReadDate ? 1 : 0);
                 }, 0);
               } else {
-                unreadCount = visibleMessages.length;
+                // If no lastReadAt, count all visible messages as unread
+                unreadCount = convo.messages.reduce((acc, m) => {
+                  if (!m) return acc;
+
+                  const msgIdStr = String(m._id);
+                  const msgDate = new Date(m.createdAt);
+
+                  // Skip if message is deleted
+                  if (m.isDeleteEvery === true) return acc;
+                  if (deletedForCurrentUser.has(msgIdStr)) return acc;
+
+                  return acc + 1;
+                }, 0);
               }
 
               // ✅ Get last message and timestamp for sorting
