@@ -196,32 +196,35 @@ export const deletePost = asyncHandler(async (req, res) => {
   return successResponse(res, "Post deleted successfully", null, null, 200, 1);
 });
 
-/* -------------------------------------------------------------------------- */
-/* 📌 GET ALL POSTS - Simple Fixed Version                                   */
-/* -------------------------------------------------------------------------- */
 export const getAllPosts = asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 10;
   const search = req.query.search ? req.query.search.trim() : "";
   const orderBy = req.query.orderBy || "createdAt";
   const order = req.query.order === "asc" ? 1 : -1;
-  const skip = (page - 1) * limit;
 
-  // ✅ First get all posts with authors
-  const posts = await Post.find({ isDeleted: { $ne: true } })
-    .populate("author", "firstname lastname email country profileimg isAdmin isDeleted")
-    .sort({ [orderBy]: order })
-    .skip(skip)
-    .limit(limit);
-
-  // ✅ Filter out posts from deleted authors
-  const visiblePosts = posts.filter((post) => post.author && !post.author.isDeleted);
-
-  // ✅ Get accurate count by counting all non-deleted posts with non-deleted authors
+  // STEP 1: Get all posts with non-deleted authors
   const allPosts = await Post.find({ isDeleted: { $ne: true } })
-    .populate("author", "isDeleted");
-  
-  const totalPosts = allPosts.filter(post => post.author && !post.author.isDeleted).length;
+    .populate("author", "firstname lastname email country profileimg isAdmin isDeleted");
+
+  // Filter deleted authors BEFORE pagination
+  const filteredPosts = allPosts.filter(
+    (post) => post.author && !post.author.isDeleted
+  );
+
+  // Total count AFTER filtering
+  const totalPosts = filteredPosts.length;
+
+  // STEP 2: Apply pagination correctly
+  const start = (page - 1) * limit;
+  const end = start + limit;
+
+  const paginatedPosts = filteredPosts
+    .sort((a, b) => {
+      if (order === 1) return new Date(a[orderBy]) - new Date(b[orderBy]);
+      return new Date(b[orderBy]) - new Date(a[orderBy]);
+    })
+    .slice(start, end);
 
   const pagination = {
     currentPage: page,
@@ -235,12 +238,13 @@ export const getAllPosts = asyncHandler(async (req, res) => {
   return successResponse(
     res,
     "Posts retrieved successfully",
-    formatPostsArray(visiblePosts),
+    formatPostsArray(paginatedPosts),
     pagination,
     200,
     1
   );
 });
+
 /* -------------------------------------------------------------------------- */
 /* 📌 GET POST BY ID                                                          */
 /* -------------------------------------------------------------------------- */

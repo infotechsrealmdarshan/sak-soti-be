@@ -56,23 +56,20 @@ export const getAllUsers = asyncHandler(async (req, res) => {
   switch (status) {
     case "active":
       query.status = "active";
-      query.isDeleted = { $ne: true };
-      query.deletedAt = { $exists: false };
+      query.isDeleted = false;
       break;
+
     case "inactive":
       query.status = "inactive";
-      query.isDeleted = { $ne: true };
-      query.deletedAt = { $exists: false };
+      query.isDeleted = false;
       break;
+
     case "deleted":
-      query.$or = [
-        { isDeleted: true },
-        { deletedAt: { $exists: true } }
-      ];
+      query.isDeleted = true;
       break;
+
     case "all":
     default:
-      // No additional filters for "all" - show all users including deleted ones
       break;
   }
 
@@ -99,7 +96,7 @@ export const getAllUsers = asyncHandler(async (req, res) => {
 
   if (cachedData && lastUpdateTime) {
     const diff = Date.now() - parseInt(lastUpdateTime);
-    if (diff < 3000) { 
+    if (diff < 3000) {
       console.log("📦 Served users from Redis cache (fresh)");
       return successResponse(res, "Users retrieved successfully (from cache)", cachedData);
     }
@@ -129,8 +126,8 @@ export const getAllUsers = asyncHandler(async (req, res) => {
     itemsPerPage: limit || totalUsers,
   };
 
-  const responseData = { 
-    users: formattedUsers, 
+  const responseData = {
+    users: formattedUsers,
     pagination,
     filters: {
       appliedStatus: status,

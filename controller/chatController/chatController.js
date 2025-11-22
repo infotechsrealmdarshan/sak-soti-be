@@ -591,10 +591,16 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     try {
       await ChatConversation.findOneAndUpdate(
         { chatRequestId: reqDoc._id },
-        { $set: { [`lastReadAtByUser.${String(userId)}`]: new Date() } },
+        {
+          $set: {
+            [`lastReadAtByUser.${String(userId)}`]: new Date()
+          }
+        },
         { upsert: true }
       );
-    } catch { }
+    } catch (error) {
+      console.warn("Failed to update last read timestamp:", error.message);
+    }
 
     const convo = await ChatConversation.findOne({ chatRequestId: reqDoc._id })
       .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
