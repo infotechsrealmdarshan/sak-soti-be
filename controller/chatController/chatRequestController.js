@@ -979,7 +979,6 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
             // Determine who is the partner (the other user in the chat)
             const isCurrentUserSender = String(obj.senderId._id) === String(userId);
             obj.partnerInfo = isCurrentUserSender ? obj.receiverId : obj.senderId;
-            obj.partnerInfo.lastSeen = new Date(); // You can add actual last seen data
           }
 
 
