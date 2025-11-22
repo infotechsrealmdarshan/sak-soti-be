@@ -188,7 +188,7 @@ export const getUserById = asyncHandler(async (req, res) => {
 // ➕ CREATE USER
 export const createUser = asyncHandler(async (req, res) => {
   const { firstname, lastname, email, password, isAdmin } = req.body;
-  if (!firstname || !lastname || !email || !password)
+  if (!firstname || !email || !password)
     return successResponse(res, "All fields are required", null, null, 200, 0);
 
   const existingUser = await User.findOne({ email });

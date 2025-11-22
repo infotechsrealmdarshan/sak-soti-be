@@ -11313,3 +11313,13 @@
 2025-11-20 17:08:53 +05:30: 🔌 Socket.IO ready for real-time connections
 2025-11-20 17:08:53 +05:30: ✅ Redis connected to Upstash
 2025-11-20 17:08:54 +05:30: ✅ MongoDB connected successfully
+2025-11-22 09:58:10 +05:30: [dotenv@17.2.3] injecting env (22) from .env -- tip: ✅ audit secrets and track compliance: https://dotenvx.com/ops
+2025-11-22 09:58:10 +05:30: [dotenv@17.2.3] injecting env (0) from .env -- tip: 🔑 add access controls to secrets: https://dotenvx.com/ops
+2025-11-22 09:58:10 +05:30: ✅ Firebase Admin SDK initialized from file: D:\sak-soti\sak-soti-backend\config\firebase-service-account.json
+2025-11-22 09:58:10 +05:30: [dotenv@17.2.3] injecting env (0) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
+2025-11-22 09:58:10 +05:30: ✅ Firebase Admin SDK already initialized
+2025-11-22 09:58:10 +05:30: ✅ Socket.IO initialized with enhanced event handlers
+2025-11-22 09:58:10 +05:30: 🚀 Server running on port 3001
+2025-11-22 09:58:10 +05:30: 🔌 Socket.IO ready for real-time connections
+2025-11-22 09:58:10 +05:30: ✅ MongoDB connected successfully
+2025-11-22 09:58:10 +05:30: ✅ Redis connected to Upstash

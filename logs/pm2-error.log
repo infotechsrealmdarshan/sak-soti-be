@@ -884,3 +884,5 @@
 2025-11-19 21:06:14 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
 2025-11-20 17:08:53 +05:30: (node:19776) [MONGOOSE] Warning: Duplicate schema index on {"chatRequestId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
 2025-11-20 17:08:53 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
+2025-11-22 09:58:10 +05:30: (node:17804) [MONGOOSE] Warning: Duplicate schema index on {"chatRequestId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+2025-11-22 09:58:10 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)

@@ -230,7 +230,6 @@ export const updateProfile = asyncHandler(async (req, res) => {
 });
 
 
-
 export const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body;
   if (!email) return successResponse(res, "Email is required", null, null, 200, 0);
@@ -331,62 +330,116 @@ export const updateStatus = asyncHandler(async (req, res) => {
 export const googleAuth = asyncHandler(async (req, res) => {
   const { idToken } = req.body;
 
-  const firebaseResult = await verifyFirebaseToken(idToken);
-  if (firebaseResult.error)
-    return successResponse(res, firebaseResult.message, null, null, 200, 0);
+  console.log("🔐 Google Auth - ID Token received:", idToken ? `Present (length: ${idToken.length})` : "Missing");
 
-  const { email, name, picture } = firebaseResult;
-  if (!email) return successResponse(res, "Firebase token missing email", null, null, 200, 0);
+  if (!idToken) {
+    return errorResponse(res, "ID Token missing", 400);
+  }
 
-  let [firstname, ...rest] = name.split(" ");
-  const lastname = rest.join(" ");
+  // STEP 1: Verify Firebase ID Token
+  const result = await verifyFirebaseToken(idToken);
 
+  console.log("🔐 Firebase verification result:", {
+    success: result.success,
+    error: result.error,
+    message: result.message,
+    email: result.email
+  });
+
+  if (result.error || !result.success) {
+    console.error("❌ Firebase token verification failed:", result.message);
+    return errorResponse(res, result.message || "Invalid Firebase ID Token", 401);
+  }
+
+  const { email, name, picture, uid } = result; // ✅ Get uid from result
+
+  if (!email) {
+    console.error("❌ Firebase token missing email");
+    return errorResponse(res, "Firebase token missing email", 400);
+  }
+
+  console.log("✅ Firebase token verified for email:", email);
+
+  // Split name
+  let firstname = "";
+  let lastname = "";
+
+  if (name) {
+    const parts = name.trim().split(" ");
+    firstname = parts[0];
+    lastname = parts.slice(1).join(" ");
+  } else {
+    firstname = email.split("@")[0];
+  }
+
+  // STEP 2: Check or create user
   let user = await User.findOne({ email: email.toLowerCase() });
 
   if (!user) {
-    // Create new user with Google profile picture
+    console.log("👤 Creating new user for email:", email);
+    
+    // ✅ CREATE USER WITH firebaseToken TO BYPASS PASSWORD REQUIREMENT
     user = await User.create({
       firstname,
       lastname,
       email: email.toLowerCase(),
       profileimg: picture || "/uploads/default.png",
-      firebaseToken: idToken,
+      firebaseToken: uid, // ✅ THIS IS CRITICAL - sets firebaseToken to bypass password validation
     });
+    console.log("✅ New Google auth user created:", user._id);
   } else {
-    // Update existing user - always save profile picture if provided from Google
-    if (picture) {
+    console.log("👤 Existing user found:", user._id);
+    // Update profile picture if changed and set firebaseToken
+    if (picture && picture !== user.profileimg) {
       user.profileimg = picture;
     }
-    user.firebaseToken = idToken;
+    // ✅ Ensure firebaseToken is set for existing users
+    if (!user.firebaseToken) {
+      user.firebaseToken = uid;
+    }
     await user.save();
+    console.log("🔄 Updated user profile image and firebaseToken");
   }
 
+  // STEP 3: Issue tokens
   const accessToken = authHelper.generateAccessToken(user);
   const refreshToken = authHelper.generateRefreshToken(user);
-  const refreshTokenExpiry = process.env.JWT_REFRESH_TOKEN_EXPIRY || "30d";
 
-  // Store refresh token in Redis with matching TTL
+  const refreshTokenExpiry = process.env.JWT_REFRESH_TOKEN_EXPIRY || "30d";
+  const refreshTokenExpiryMs = authHelper.parseExpiry(refreshTokenExpiry);
+  const refreshTokenExpirySeconds = Math.floor(refreshTokenExpiryMs / 1000);
+
+  // STEP 4: Save refresh token in Redis
   try {
-    const refreshTokenExpiryMs = authHelper.parseExpiry(refreshTokenExpiry);
-    const refreshTokenExpirySeconds = Math.floor(refreshTokenExpiryMs / 1000);
-    await redisClient.setEx(`refreshToken:${user._id}`, refreshTokenExpirySeconds, refreshToken);
-    await redisClient.setEx(`user:${user._id}`, 3600, JSON.stringify(user));
-  } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    await redisClient.setEx(
+      `refreshToken:${user._id}`,
+      refreshTokenExpirySeconds,
+      refreshToken
+    );
+    console.log("✅ Refresh token stored in Redis");
+  } catch (err) {
+    console.warn("⚠️ Redis save failed:", err.message);
   }
 
-  // Exclude password and firebaseToken from response
+  // STEP 5: Clean user response
   const userResponse = user.toObject();
   delete userResponse.password;
-  delete userResponse.firebaseToken;
+  delete userResponse.firebaseToken; // Remove sensitive data
 
-  return successResponse(res, "Google login successful", {
-    accessToken,
-    refreshToken,
-    user: userResponse
-  }, null, 200, 1);
+  console.log("✅ Google authentication successful for user:", user.email);
+
+  return successResponse(
+    res,
+    "Google login successful",
+    {
+      accessToken,
+      user: userResponse,
+    },
+    null,
+    200,
+    1
+  );
 });
-
 
 export const refreshToken = asyncHandler(async (req, res) => {
   const { token } = req.body;

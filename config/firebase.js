@@ -1,20 +1,13 @@
 import admin from "firebase-admin";
 import dotenv from "dotenv";
-import { readFileSync } from "fs";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
 import { successResponse, errorResponse } from "../utils/response.js";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
 let firebaseApp = null;
 
 /**
- * Initialize Firebase Admin SDK
- * Supports multiple configuration methods
+ * Initialize Firebase Admin SDK from Environment Variables
  */
 export const initializeFirebase = () => {
   try {
@@ -30,91 +23,73 @@ export const initializeFirebase = () => {
       };
     }
 
-    // Option 1: Load from JSON file
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
-      try {
-        const envPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH.trim();
-        const isAbsolutePath =
-          envPath.startsWith("/") ||
-          (process.platform === "win32" && /^[A-Za-z]:/.test(envPath));
+    // Check if all required environment variables are present
+    const requiredEnvVars = [
+      'FIREBASE_PROJECT_ID',
+      'FIREBASE_PRIVATE_KEY', 
+      'FIREBASE_CLIENT_EMAIL'
+    ];
 
-        const serviceAccountPath = isAbsolutePath
-          ? envPath
-          : join(__dirname, "..", envPath);
-
-        const serviceAccount = JSON.parse(readFileSync(serviceAccountPath, "utf8"));
-        firebaseApp = admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-        });
-
-        console.log(`✅ Firebase Admin SDK initialized from file: ${serviceAccountPath}`);
-        return {
-          statusCode: 200,
-          status: 1,
-          message: "Firebase initialized from service account file",
-          data: { source: "file", path: serviceAccountPath },
-        };
-      } catch (error) {
-        console.error("❌ Error reading Firebase service account file:", error.message);
-      }
-    }
-
-    // Option 2: Use environment variables
-    if (
-      process.env.FIREBASE_PROJECT_ID &&
-      process.env.FIREBASE_PRIVATE_KEY &&
-      process.env.FIREBASE_CLIENT_EMAIL
-    ) {
-      firebaseApp = admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        }),
-      });
-
-      console.log("✅ Firebase Admin SDK initialized with environment variables");
+    const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+    
+    if (missingVars.length > 0) {
+      console.error("❌ Missing required Firebase environment variables:", missingVars);
       return {
-        statusCode: 200,
-        status: 1,
-        message: "Firebase initialized from environment variables",
-        data: { source: "env" },
+        statusCode: 500,
+        message: `Missing Firebase environment variables: ${missingVars.join(', ')}`,
+        data: null,
       };
     }
 
-    // Option 3: Use JSON string in env
-    if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-      try {
-        const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-        firebaseApp = admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-        });
+    console.log("🔧 Initializing Firebase from environment variables...");
+    console.log("📧 Client Email:", process.env.FIREBASE_CLIENT_EMAIL);
+    console.log("🏢 Project ID:", process.env.FIREBASE_PROJECT_ID);
 
-        console.log("✅ Firebase Admin SDK initialized from JSON string");
-        return {
-          statusCode: 200,
-          status: 1,
-          message: "Firebase initialized from JSON string",
-          data: { source: "json_string" },
-        };
-      } catch (error) {
-        console.error("❌ Error parsing FIREBASE_SERVICE_ACCOUNT_JSON:", error.message);
-      }
-    }
+    // Fix private key formatting (replace \n with actual newlines)
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
 
-    // No valid configuration found
-    console.warn("⚠️ Firebase Admin SDK not configured properly.");
-    return {
-      statusCode: 401,
-      message:
-        "Firebase configuration missing. Please set FIREBASE_SERVICE_ACCOUNT_PATH, FIREBASE_PROJECT_ID, or FIREBASE_SERVICE_ACCOUNT_JSON.",
-      data: null,
+    const serviceAccount = {
+      type: "service_account",
+      project_id: process.env.FIREBASE_PROJECT_ID,
+      private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+      private_key: privateKey,
+      client_email: process.env.FIREBASE_CLIENT_EMAIL,
+      client_id: process.env.FIREBASE_CLIENT_ID,
+      auth_uri: process.env.FIREBASE_AUTH_URI || "https://accounts.google.com/o/oauth2/auth",
+      token_uri: process.env.FIREBASE_TOKEN_URI || "https://oauth2.googleapis.com/token",
+      auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_CERT_URL || "https://www.googleapis.com/oauth2/v1/certs",
+      client_x509_cert_url: process.env.FIREBASE_CLIENT_CERT_URL,
+      universe_domain: process.env.FIREBASE_UNIVERSE_DOMAIN || "googleapis.com"
     };
+
+    firebaseApp = admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+
+    console.log("✅ Firebase Admin SDK initialized successfully from environment variables");
+    
+    return {
+      statusCode: 200,
+      status: 1,
+      message: "Firebase initialized successfully",
+      data: { 
+        source: "environment_variables",
+        projectId: process.env.FIREBASE_PROJECT_ID
+      },
+    };
+
   } catch (error) {
     console.error("❌ Firebase Admin SDK initialization error:", error.message);
+    
+    // More detailed error logging
+    if (error.message.includes("private key")) {
+      console.error("🔑 Private key format issue detected");
+      console.error("Private key preview:", process.env.FIREBASE_PRIVATE_KEY?.substring(0, 100));
+    }
+    
     return {
       statusCode: 500,
-      message: "Firebase initialization failed",
+      message: `Firebase initialization failed: ${error.message}`,
       data: null,
     };
   }
@@ -122,50 +97,67 @@ export const initializeFirebase = () => {
 
 /**
  * Verify Firebase ID Token
- * Returns unified structured response
  */
 export const verifyFirebaseToken = async (idToken) => {
+  // Ensure Firebase is initialized
   if (!firebaseApp) {
-    initializeFirebase();
+    const initResult = initializeFirebase();
+    if (initResult.statusCode !== 200) {
+      return {
+        success: false,
+        message: "Firebase not initialized properly",
+        error: true
+      };
+    }
   }
 
   if (!admin.apps.length) {
     return {
-      statusCode: 500,
+      success: false,
       message: "Firebase Admin SDK not initialized",
-      data: null,
+      error: true
     };
   }
 
   try {
+    console.log("🔐 Verifying Firebase token...");
     const decoded = await admin.auth().verifyIdToken(idToken);
+
+    console.log("✅ Firebase token verified successfully");
+    console.log("📧 User email:", decoded.email);
+    console.log("🆔 User UID:", decoded.uid);
+
     return {
-      statusCode: 200,
-      status: 1,
-      message: "Firebase token verified successfully",
-      data: {
-        uid: decoded.uid,
-        email: decoded.email,
-        name: decoded.name,
-        picture: decoded.picture,
-        decoded,
-      },
+      success: true,
+      error: false,
+      email: decoded.email,
+      name: decoded.name,
+      picture: decoded.picture,
+      uid: decoded.uid,
+      decoded,
     };
   } catch (error) {
     console.error("❌ Firebase token verification error:", error.message);
+    console.error("Error code:", error.code);
+    console.error("Error details:", error.details);
 
     let message = "Invalid Firebase token";
-    let statusCode = 401;
-
+    
     if (error.code === "auth/id-token-expired") {
       message = "Firebase token expired";
-      statusCode = 401;
+    } else if (error.code === "auth/argument-error") {
+      message = "Malformed Firebase token";
+    } else if (error.code === "auth/id-token-has-wrong-audience") {
+      message = "Token audience doesn't match Firebase project";
+    } else if (error.code === "auth/id-token-revoked") {
+      message = "Firebase token has been revoked";
     }
 
     return {
-      statusCode,
+      success: false,
+      error: true,
       message,
-      data: null,
+      code: error.code
     };
   }
 };

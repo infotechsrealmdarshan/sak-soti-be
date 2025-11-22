@@ -65,13 +65,14 @@ export const initializeSocket = (server) => {
       }
 
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const user = await User.findById(decoded.id).select("_id");
+      const user = await User.findById(decoded.id).select("_id firstname lastname");
 
       if (!user) {
         return next(new Error("Authentication error: User not found"));
       }
 
       socket.userId = decoded.id;
+      socket.userData = user;
       next();
     } catch (error) {
       next(new Error("Authentication error: Invalid token"));
@@ -84,6 +85,12 @@ export const initializeSocket = (server) => {
 
     // Join room for user ID to receive messages
     socket.join(`user:${userId}`);
+
+    socket.emit("connected", {
+      message: "Successfully connected and authenticated",
+      userId: String(userId),
+      socketId: socket.id
+    });
 
     // Auto-join all chat rooms the user is a participant of
     (async () => {
@@ -107,21 +114,23 @@ export const initializeSocket = (server) => {
     })();
 
     socket.on("joinChat", (data) => {
-      console.log("🎯 Backend received joinChat with data:", data);
-
-      // Handle both object and direct parameter
       const chatId = typeof data === 'object' ? data.chatId : data;
 
       if (!chatId || !mongoose.Types.ObjectId.isValid(chatId)) {
-        console.log("❌ Invalid chat ID:", chatId);
-        return socket.emit('error', { message: 'Invalid chat ID' });
+        return socket.emit("error", { message: "Invalid chat ID" });
       }
 
-      socket.join(`chat:${chatId}`);
-      console.log(`✅ User ${userId} joined chat room: chat:${chatId}`);
+      const roomName = `chat:${chatId}`;
+      socket.join(roomName);
 
-      // Verify room joining
-      console.log(`🏠 User ${userId} rooms after join:`, Array.from(socket.rooms));
+      // Send confirmation that room was joined
+      socket.emit("roomJoined", {
+        chatId: String(chatId),
+        room: roomName,
+        success: true
+      });
+
+      console.log(`✅ User ${userId} joined ${roomName}`);
     });
 
     // Handle leaving chat room
@@ -156,7 +165,7 @@ export const initializeSocket = (server) => {
         // Check if user is participant (for individual chats)
         if (chatRequest.chatType === 'individual') {
           const participants = [
-            chatRequest.senderId.toString(), 
+            chatRequest.senderId.toString(),
             chatRequest.receiverId.toString()
           ];
           if (!participants.includes(senderId)) {
@@ -166,71 +175,95 @@ export const initializeSocket = (server) => {
 
         // Check if user is member (for group chats)
         if (chatRequest.chatType === 'group') {
-          const isParticipant = 
+          const isParticipant =
             String(chatRequest.groupAdmin) === String(senderId) ||
             (chatRequest.superAdmins || []).map(String).includes(String(senderId)) ||
             (chatRequest.members || []).map(String).includes(String(senderId));
-          
+
           if (!isParticipant) {
             return socket.emit('error', { message: 'Not a member of this group' });
           }
         }
 
         // Get sender info
-        const sender = await User.findById(senderId).select("firstname lastname email profileimg");
+        const sender = await User.findById(senderId).select("firstname lastname email profileimg isDeleted");
         if (!sender) {
           return socket.emit('error', { message: 'Sender not found' });
         }
 
-        // Create message object for real-time broadcast
-        const timestamp = new Date().toISOString();
+        // ✅ Handle deleted users in sender info
+        let senderInfo;
+        if (sender.isDeleted === true) {
+          senderInfo = {
+            _id: String(sender._id),
+            firstname: "Profile",
+            lastname: "Deleted",
+            email: "",
+            profileimg: "/uploads/default.png",
+            isDeleted: true
+          };
+        } else {
+          senderInfo = {
+            _id: String(sender._id),
+            firstname: sender.firstname,
+            lastname: sender.lastname,
+            email: sender.email,
+            profileimg: sender.profileimg
+          };
+        }
+
+        const timestamp = new Date();
+
+        // ✅ Create message object matching your API response structure
         const messageData = {
           _id: `temp-${Date.now()}`,
           chatId: String(chatId),
           chatRequestId: String(chatId),
           content: message,
           messageType: 'text',
+          mediaUrl: null,
+          isDeleteMe: false,
+          isDeleteEvery: false,
+          deletedAt: null,
+          deletedBy: null,
+          deletedFor: null,
+          canEdit: true, // User can edit their own text messages
+          isEdited: false,
+          editedAt: null,
           createdAt: timestamp,
           time: timestamp,
-          sender: {
-            _id: String(sender._id),
-            firstname: sender.firstname,
-            lastname: sender.lastname,
-            email: sender.email,
-            profileimg: sender.profileimg
-          },
-          type: 'receive'
+          sender: senderInfo,
+          type: String(sender._id) === String(userId) ? 'send' : 'receive'
         };
 
-        // Emit to all users in the chat room (including sender for consistency)
+        // ✅ Emit to all users in the chat room with consistent structure
         io.to(`chat:${chatId}`).emit("newMessage", messageData);
-        
-        // Also emit chat list update to all participants
+
+        // ✅ Also emit chat list update to all participants with same structure
         const chatListUpdateData = {
           chatId: String(chatId),
           action: "newMessage",
-          lastMessage: {
-            ...messageData,
-            type: String(sender._id) === String(userId) ? 'send' : 'receive'
-          }
+          lastMessage: messageData
         };
 
         // For individual chats, notify both participants
         if (chatRequest.chatType === 'individual') {
-          const otherUserId = String(chatRequest.senderId) === String(senderId) 
+          const otherUserId = String(chatRequest.senderId) === String(senderId)
             ? String(chatRequest.receiverId)
             : String(chatRequest.senderId);
-          
+
+          // Update sender's chat list with 'send' type
           io.to(`user:${senderId}`).emit("chatList:update", {
             ...chatListUpdateData,
-            lastMessage: { ...chatListUpdateData.lastMessage, type: 'send' }
+            lastMessage: { ...messageData, type: 'send' }
           });
-          
+
+          // Update receiver's chat list with 'receive' type
           io.to(`user:${otherUserId}`).emit("chatList:update", {
             ...chatListUpdateData,
-            lastMessage: { ...chatListUpdateData.lastMessage, type: 'receive' }
+            lastMessage: { ...messageData, type: 'receive' }
           });
-        } 
+        }
         // For group chats, notify all members
         else if (chatRequest.chatType === 'group') {
           const allMemberIds = [
@@ -243,7 +276,7 @@ export const initializeSocket = (server) => {
             const messageType = String(memberId) === String(senderId) ? 'send' : 'receive';
             io.to(`user:${memberId}`).emit("chatList:update", {
               ...chatListUpdateData,
-              lastMessage: { ...chatListUpdateData.lastMessage, type: messageType }
+              lastMessage: { ...messageData, type: messageType }
             });
           });
         }
@@ -268,11 +301,11 @@ export const initializeSocket = (server) => {
 
         // Here you would typically fetch messages from database
         // For now, we'll just acknowledge the request
-        socket.emit("messagesFetched", { 
-          chatId, 
-          page, 
+        socket.emit("messagesFetched", {
+          chatId,
+          page,
           limit,
-          message: "Messages fetch request received" 
+          message: "Messages fetch request received"
         });
 
       } catch (error) {
@@ -296,79 +329,136 @@ export const initializeSocket = (server) => {
     });
 
     // ✅ TYPING INDICATOR: Listen for typing start events
+    // Add this to your backend socket.js in the connection handler
+
+    // ✅ Enhanced typing handlers with logging
     socket.on("typing:start", async (data) => {
       const { chatId } = data;
-      if (!chatId || !mongoose.Types.ObjectId.isValid(chatId)) {
-        return socket.emit('error', { message: 'Invalid chat ID for typing' });
+      console.log("⌨️ [BACKEND] TYPING START RECEIVED:", {
+        chatId: chatId,
+        userId: socket.userId,
+        socketId: socket.id,
+        timestamp: new Date().toISOString()
+      });
+
+      if (!chatId) {
+        console.error("❌ [BACKEND] No chatId in typing:start");
+        return;
       }
 
       try {
-        // Get user info for typing indicator
-        const user = await User.findById(userId).select("firstname lastname email profileimg");
-        if (!user) return;
+        // Get user info (use cached or fetch)
+        let user = socket.userData;
+        if (!user || !user.profileimg) {
+          user = await User.findById(socket.userId)
+            .select("firstname lastname email profileimg");
+          socket.userData = user;
+        }
 
         const typingData = {
           chatId: String(chatId),
-          userId: String(userId),
-          user: {
+          userId: String(socket.userId),
+          user: user ? {
             _id: String(user._id),
             firstname: user.firstname,
             lastname: user.lastname,
             email: user.email,
             profileimg: user.profileimg
-          },
+          } : { _id: String(socket.userId) },
           isTyping: true
         };
 
-        // Emit to chat room (excluding the sender)
+        console.log("📤 [BACKEND] Broadcasting typing start to room:", {
+          chatId: chatId,
+          userId: socket.userId,
+          userEmail: user?.email,
+          targetRoom: `chat:${chatId}`
+        });
+
+        // Emit to room (excluding sender)
         socket.to(`chat:${chatId}`).emit("userTyping", typingData);
-        try {
-          const participantIds = await getChatParticipantIds(chatId);
-          participantIds
-            .filter((participantId) => participantId !== String(userId))
-            .forEach((participantId) => {
-              io.to(`user:${participantId}`).emit("userTyping", typingData);
+
+        // Also emit to individual user rooms for participants
+        const participants = await getChatParticipantIds(chatId);
+        console.log("👥 [BACKEND] Typing participants:", {
+          chatId: chatId,
+          allParticipants: participants,
+          currentUser: socket.userId,
+          otherParticipants: participants.filter(pid => pid !== String(socket.userId))
+        });
+
+        participants
+          .filter(pid => pid !== String(socket.userId))
+          .forEach(pid => {
+            console.log("📨 [BACKEND] Sending typing to user room:", {
+              targetUser: pid,
+              room: `user:${pid}`
             });
-        } catch (err) {
-          console.error("Error broadcasting typing:start to participants:", err.message);
-        }
-        console.log(`⌨️ User ${userId} started typing in chat: ${chatId}`);
+            io.to(`user:${pid}`).emit("userTyping", typingData);
+          });
+
+        console.log("✅ [BACKEND] Typing start broadcast completed");
+
       } catch (error) {
-        console.error("Error handling typing:start:", error.message);
+        console.error("❌ [BACKEND] typing:start error:", error.message);
       }
     });
 
-    // ✅ TYPING INDICATOR: Listen for typing stop events
-    socket.on("typing:stop", (data) => {
+    socket.on("typing:stop", async (data) => {
       const { chatId } = data;
-      if (!chatId || !mongoose.Types.ObjectId.isValid(chatId)) {
-        return socket.emit('error', { message: 'Invalid chat ID for typing' });
-      }
+      console.log("🛑 [BACKEND] TYPING STOP RECEIVED:", {
+        chatId: chatId,
+        userId: socket.userId,
+        socketId: socket.id,
+        timestamp: new Date().toISOString()
+      });
+
+      if (!chatId) return;
 
       const typingData = {
         chatId: String(chatId),
-        userId: String(userId),
+        userId: String(socket.userId),
         isTyping: false
       };
 
-      // Emit to chat room (excluding the sender)
-      socket.to(`chat:${chatId}`).emit("userTyping", typingData);
-      getChatParticipantIds(chatId).then((participantIds) => {
-        participantIds
-          .filter((participantId) => participantId !== String(userId))
-          .forEach((participantId) => {
-            io.to(`user:${participantId}`).emit("userTyping", typingData);
-          });
-      }).catch((err) => {
-        console.error("Error broadcasting typing:stop to participants:", err.message);
+      console.log("📤 [BACKEND] Broadcasting typing stop to room:", {
+        chatId: chatId,
+        userId: socket.userId,
+        targetRoom: `chat:${chatId}`
       });
-      console.log(`⌨️ User ${userId} stopped typing in chat: ${chatId}`);
+
+      socket.to(`chat:${chatId}`).emit("userTyping", typingData);
+
+      // Also emit to individual user rooms
+      try {
+        const participants = await getChatParticipantIds(chatId);
+        console.log("👥 [BACKEND] Typing stop participants:", {
+          chatId: chatId,
+          allParticipants: participants,
+          currentUser: socket.userId,
+          otherParticipants: participants.filter(pid => pid !== String(socket.userId))
+        });
+
+        participants
+          .filter(pid => pid !== String(socket.userId))
+          .forEach(pid => {
+            console.log("📨 [BACKEND] Sending typing stop to user room:", {
+              targetUser: pid,
+              room: `user:${pid}`
+            });
+            io.to(`user:${pid}`).emit("userTyping", typingData);
+          });
+
+        console.log("✅ [BACKEND] Typing stop broadcast completed");
+      } catch (error) {
+        console.error("❌ [BACKEND] typing:stop broadcast error:", error.message);
+      }
     });
 
     // ✅ NEW: Handle connection confirmation
     socket.on("connected", (data) => {
       console.log("✅ Client confirmed connection:", data);
-      socket.emit("connected", { 
+      socket.emit("connected", {
         message: "Successfully connected to server",
         userId: String(userId),
         socketId: socket.id

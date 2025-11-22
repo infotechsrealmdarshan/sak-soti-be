@@ -821,7 +821,8 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       obj.unreadCount = unreadCount;
       obj.pendingMembers = pendingMembers.map(pm => ({
         userId: pm.userId,
-        count: pm.count > 9 ? "9+" : pm.count,
+        // count: pm.count > 9 ? "9+" : pm.count,
+        count: pm.count,
       }));
 
       return obj;
@@ -1034,7 +1035,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
 
           // ✅ Add enhanced fields to response
-          obj.unreadCount = unreadCount > 9 ? "9+" : unreadCount;
+          obj.unreadCount = unreadCount;
           obj.lastMessage = lastMessage;
           obj.lastMessageTimestamp = lastMessageTimestamp || obj.updatedAt || obj.createdAt;
         }
