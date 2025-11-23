@@ -570,7 +570,7 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
-  const cacheKey = `chat:${String(chatId)}:user:${String(userId)}:page:${page}:limit:${limit}:search:${search}:${Date.now()}`;
+  const cacheKey = `chat:${String(chatId)}:user:${String(userId)}:page:${page}:limit:${limit}:search:${search}`;
 
   const cached = await redisClient.get(cacheKey);
   if (cached) {
@@ -602,18 +602,36 @@ export const getChatMessages = asyncHandler(async (req, res) => {
       console.warn("Failed to update last read timestamp:", error.message);
     }
 
-    const convo = await ChatConversation.findOne({ chatRequestId: reqDoc._id })
-      .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+    let convo;
+    try {
+      convo = await ChatConversation.findOne({ chatRequestId: reqDoc._id })
+        .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+    } catch (error) {
+      console.error("Error fetching conversation:", error.message);
+      return errorResponse(res, "Failed to fetch messages", 500);
+    }
 
     const deletedForMeMap = createDeletedForMeMap(convo, userId);
 
-    let messages = (convo?.messages || [])
-      .map(m => {
-        const isDeleteMe = deletedForMeMap.has(m._id.toString());
-        if (isDeleteMe) return null;
-        return createMessageResponse(m, userId, chatId);
-      })
-      .filter(m => m !== null);
+    let messages = [];
+    try {
+      messages = (convo?.messages || [])
+        .map(m => {
+          if (!m) return null;
+          const isDeleteMe = deletedForMeMap.has(m._id.toString());
+          if (isDeleteMe) return null;
+          try {
+            return createMessageResponse(m, userId, chatId);
+          } catch (error) {
+            console.warn("Error creating message response:", error.message);
+            return null;
+          }
+        })
+        .filter(m => m !== null);
+    } catch (error) {
+      console.error("Error processing messages:", error.message);
+      return errorResponse(res, "Failed to process messages", 500);
+    }
 
     if (search) {
       const searchLower = search.toLowerCase();
@@ -660,33 +678,55 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     );
   } catch { }
 
-  const convo = await ChatConversation.findOne({ chatRequestId: groupRoot._id })
-    .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+  let convo;
+  try {
+    convo = await ChatConversation.findOne({ chatRequestId: groupRoot._id })
+      .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+  } catch (error) {
+    console.error("Error fetching group conversation:", error.message);
+    return errorResponse(res, "Failed to fetch messages", 500);
+  }
 
   let joinedAtDate = null;
   if (convo?.joinedAtByUser) {
-    const joinedEntry = typeof convo.joinedAtByUser.get === "function"
-      ? convo.joinedAtByUser.get(String(userId))
-      : convo.joinedAtByUser[String(userId)];
-    if (joinedEntry) {
-      joinedAtDate = new Date(joinedEntry);
+    try {
+      const joinedEntry = typeof convo.joinedAtByUser.get === "function"
+        ? convo.joinedAtByUser.get(String(userId))
+        : convo.joinedAtByUser[String(userId)];
+      if (joinedEntry) {
+        joinedAtDate = new Date(joinedEntry);
+      }
+    } catch (error) {
+      console.warn("Error getting joinedAtDate:", error.message);
     }
   }
 
   const deletedForMeMap = createDeletedForMeMap(convo, userId);
 
-  let messages = (convo?.messages || [])
-    .map(m => {
-      const isDeleteMe = deletedForMeMap.has(m._id.toString());
-      if (isDeleteMe) return null;
+  let messages = [];
+  try {
+    messages = (convo?.messages || [])
+      .map(m => {
+        if (!m) return null;
+        const isDeleteMe = deletedForMeMap.has(m._id.toString());
+        if (isDeleteMe) return null;
 
-      if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
-        return null;
-      }
+        if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
+          return null;
+        }
 
-      return createMessageResponse(m, userId, groupRoot._id);
-    })
-    .filter(m => m !== null);
+        try {
+          return createMessageResponse(m, userId, groupRoot._id);
+        } catch (error) {
+          console.warn("Error creating message response:", error.message);
+          return null;
+        }
+      })
+      .filter(m => m !== null);
+  } catch (error) {
+    console.error("Error processing group messages:", error.message);
+    return errorResponse(res, "Failed to process messages", 500);
+  }
 
   if (search) {
     const searchLower = search.toLowerCase();

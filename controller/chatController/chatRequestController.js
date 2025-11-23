@@ -12,6 +12,23 @@ import ChatConversation from "../../models/ChatConversation.js";
 import { checkUserDeleted } from "../../utils/chatHelper.js";
 // ... other imports
 
+// Helper function to delete Redis keys by pattern
+const deleteRedisKeysByPattern = async (pattern) => {
+  if (!redisClient || typeof redisClient.scan !== "function") return;
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, keys] = await redisClient.scan(cursor, "MATCH", pattern, "COUNT", 50);
+      cursor = nextCursor;
+      if (Array.isArray(keys) && keys.length > 0) {
+        await redisClient.del(...keys);
+      }
+    } while (cursor !== "0");
+  } catch (err) {
+    console.warn(`Redis delete failed for pattern ${pattern}:`, err.message);
+  }
+};
+
 export const sendChatRequest = asyncHandler(async (req, res) => {
   const senderId = req.user?.id;
   const { postId } = req.body;
@@ -226,9 +243,19 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
       console.error("Socket emit error (rejected):", err.message);
     }
 
-    // Redis clear
+    // Redis clear - use pattern matching to clear all cache keys with pagination/search params
     try {
-      const cacheKeys = [
+      const patterns = [
+        `requests:${String(request.senderId)}:received:*`,
+        `requests:${String(request.senderId)}:sent:*`,
+        `requests:${String(request.senderId)}:accepted:*`,
+        `requests:${String(request.receiverId)}:received:*`,
+        `requests:${String(request.receiverId)}:sent:*`,
+        `requests:${String(request.receiverId)}:accepted:*`,
+      ];
+      
+      // Also clear exact keys without pagination (for backward compatibility)
+      const exactKeys = [
         `requests:${String(request.senderId)}:received`,
         `requests:${String(request.senderId)}:sent`,
         `requests:${String(request.senderId)}:accepted`,
@@ -236,7 +263,11 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
         `requests:${String(request.receiverId)}:sent`,
         `requests:${String(request.receiverId)}:accepted`,
       ];
-      await redisClient.del(cacheKeys);
+      
+      await Promise.all([
+        ...patterns.map(pattern => deleteRedisKeysByPattern(pattern)),
+        redisClient.del(exactKeys)
+      ]);
     } catch (err) {
       console.warn("Redis clear error:", err.message);
     }
@@ -276,6 +307,11 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
   // ===========================================================
   // 🔸 ACCEPT FLOW
   // ===========================================================
+  // ✅ Check if already accepted to prevent duplicate processing
+  if (request.status === "accepted") {
+    return successResponse(res, "Chat request already accepted", request, null, 200, 1);
+  }
+
   request.status = "accepted";
   await request.save();
 
@@ -348,15 +384,20 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
     }
   }
 
-  const populated = await request.populate([
-    { path: "senderId", select: "firstname lastname email profileimg" },
-    { path: "receiverId", select: "firstname lastname email profileimg" },
-    { path: "groupId" },
-  ]);
-
-  // Redis clear
+  // Redis clear - use pattern matching to clear all cache keys with pagination/search params
+  // ✅ Clear cache BEFORE emitting socket events to ensure fresh data
   try {
-    const cacheKeys = [
+    const patterns = [
+      `requests:${String(request.senderId)}:received:*`,
+      `requests:${String(request.senderId)}:sent:*`,
+      `requests:${String(request.senderId)}:accepted:*`,
+      `requests:${String(request.receiverId)}:received:*`,
+      `requests:${String(request.receiverId)}:sent:*`,
+      `requests:${String(request.receiverId)}:accepted:*`,
+    ];
+    
+    // Also clear exact keys without pagination (for backward compatibility)
+    const exactKeys = [
       `requests:${String(request.senderId)}:received`,
       `requests:${String(request.senderId)}:sent`,
       `requests:${String(request.senderId)}:accepted`,
@@ -364,10 +405,29 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
       `requests:${String(request.receiverId)}:sent`,
       `requests:${String(request.receiverId)}:accepted`,
     ];
-    await redisClient.del(cacheKeys);
+    
+    await Promise.all([
+      ...patterns.map(pattern => deleteRedisKeysByPattern(pattern)),
+      redisClient.del(exactKeys)
+    ]);
+    console.log(`✅ Cache cleared for sender ${request.senderId} and receiver ${request.receiverId}`);
   } catch (err) {
     console.warn("Redis clear error:", err.message);
   }
+
+  // ✅ Get fresh populated request after cache clear and save
+  const populated = await ChatRequest.findById(request._id).populate([
+    { path: "senderId", select: "firstname lastname email profileimg" },
+    { path: "receiverId", select: "firstname lastname email profileimg" },
+    { path: "groupId" },
+  ]);
+
+  if (!populated) {
+    return errorResponse(res, "Failed to fetch updated request", 500);
+  }
+  
+  // Ensure populated request has the accepted status
+  populated.status = "accepted";
 
   // Emit socket updates
   try {
@@ -385,8 +445,52 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
     io.to(`user:${request.receiverId}`).emit("chatRequest:accepted", payload);
     io.to(`user:${request.senderId}`).emit("chatRequests:update");
     io.to(`user:${request.receiverId}`).emit("chatRequests:update");
+
+    // ✅ NEW: Emit specific chatList:update events to update tabs
+    // Format the populated request for accepted tab
+    const formattedRequest = populated.toObject ? populated.toObject() : populated;
+    
+    // Add partnerInfo for individual chats
+    if (formattedRequest.chatType === "individual") {
+      // For receiver: partner is sender
+      formattedRequest.partnerInfo = formattedRequest.senderId;
+      // For sender: partner is receiver
+      const senderFormattedRequest = { ...formattedRequest };
+      senderFormattedRequest.partnerInfo = formattedRequest.receiverId;
+      
+      // Emit to RECEIVER: Remove from "received" tab, Add to "accepted" tab
+      io.to(`user:${request.receiverId}`).emit("chatList:update", {
+        type: "received",
+        action: "removed",
+        chatId: String(request._id),
+        chatRequest: formattedRequest
+      });
+      io.to(`user:${request.receiverId}`).emit("chatList:update", {
+        type: "accepted",
+        action: "added",
+        chatId: String(request._id),
+        chatRequest: formattedRequest
+      });
+
+      // Emit to SENDER: Remove from "sent" tab, Add to "accepted" tab
+      io.to(`user:${request.senderId}`).emit("chatList:update", {
+        type: "sent",
+        action: "removed",
+        chatId: String(request._id),
+        chatRequest: senderFormattedRequest
+      });
+      io.to(`user:${request.senderId}`).emit("chatList:update", {
+        type: "accepted",
+        action: "added",
+        chatId: String(request._id),
+        chatRequest: senderFormattedRequest
+      });
+    }
+
+    console.log(`✅ Chat request accepted - socket events emitted to sender ${request.senderId} and receiver ${request.receiverId}`);
   } catch (err) {
     console.error("Socket emit error (accepted):", err.message);
+    // Don't fail the request if socket emit fails, but log it
   }
 
   // Send notification
