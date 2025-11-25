@@ -123,7 +123,14 @@ export const selectPlan = async (req, res) => {
     // Ensure stripe customer exists
     let stripeCustomerId = user.stripeCustomerId;
     if (!stripeCustomerId) {
-      stripeCustomerId = await createStripeCustomer(user);
+      const customer = await stripe.customers.create({
+        email: user.email,
+        name: `${user.firstname} ${user.lastname}`,
+        metadata: {
+          userId: userId.toString(),
+        },
+      });
+      stripeCustomerId = customer.id;
       user.stripeCustomerId = stripeCustomerId;
       await user.save();
     }
@@ -177,7 +184,52 @@ export const selectPlan = async (req, res) => {
 
     const { planType: detectedPlanType } = describePlan(priceDetails, priceDetails.product);
 
-    // ✅ METHOD 1: Create Payment Intent First (More Reliable)
+    // ✅ CREATE SUBSCRIPTION RECORD FIRST (BEFORE payment intent)
+    const now = new Date();
+    const tempEndDate = new Date(now);
+    
+    // Set temporary end date based on plan type
+    if (detectedPlanType === "yearly") {
+      tempEndDate.setFullYear(tempEndDate.getFullYear() + 1);
+    } else if (detectedPlanType === "monthly") {
+      tempEndDate.setMonth(tempEndDate.getMonth() + 1);
+    } else {
+      tempEndDate.setDate(tempEndDate.getDate() + 1);
+    }
+
+    // Check for existing pending subscription
+    let subscriptionRecord = await Subscription.findOne({
+      userId: user._id,
+      status: { $in: ["pending_payment", "in_progress"] }
+    }).sort({ createdAt: -1 });
+
+    if (subscriptionRecord) {
+      // Update existing pending subscription
+      subscriptionRecord.stripeCustomerId = stripeCustomerId;
+      subscriptionRecord.priceId = priceId;
+      subscriptionRecord.amount = priceDetails.unit_amount / 100;
+      subscriptionRecord.currency = priceDetails.currency;
+      subscriptionRecord.planType = detectedPlanType;
+      subscriptionRecord.status = "pending_payment";
+      subscriptionRecord.startDate = now;
+      subscriptionRecord.endDate = tempEndDate;
+      await subscriptionRecord.save();
+    } else {
+      // Create new subscription record
+      subscriptionRecord = await Subscription.create({
+        userId: user._id,
+        stripeCustomerId,
+        priceId,
+        amount: priceDetails.unit_amount / 100,
+        currency: priceDetails.currency,
+        planType: detectedPlanType,
+        status: "pending_payment",
+        startDate: now,
+        endDate: tempEndDate
+      });
+    }
+
+    // ✅ NOW CREATE PAYMENT INTENT (after subscriptionRecord is defined)
     const paymentIntent = await stripe.paymentIntents.create({
       amount: priceDetails.unit_amount,
       currency: priceDetails.currency,
@@ -190,80 +242,16 @@ export const selectPlan = async (req, res) => {
       metadata: {
         userId: user._id.toString(),
         planType: detectedPlanType,
-        priceId: priceId
+        priceId: priceId,
+        subscriptionId: subscriptionRecord._id.toString() // ✅ Now subscriptionRecord is defined
       }
     });
 
-    // ✅ ADD THIS: Create subscription linked to this payment
-    const subscription = await stripe.subscriptions.create({
-      customer: stripeCustomerId,
-      items: [{ price: priceId }],
-      payment_behavior: 'default_incomplete',
-      payment_settings: {
-        payment_method_types: ['card'],
-        save_default_payment_method: 'on_subscription'
-      },
-      expand: ['latest_invoice.payment_intent'],
-      metadata: {
-        userId: user._id.toString(),
-        planType: detectedPlanType,
-        originalPaymentIntentId: paymentIntent.id
-      }
-    });
+    // ✅ UPDATE SUBSCRIPTION RECORD WITH PAYMENT INTENT ID
+    subscriptionRecord.stripePaymentIntentId = paymentIntent.id;
+    await subscriptionRecord.save();
 
-    // ✅ Update your subscription record with subscription ID
-    if (subscriptionRecord) {
-      subscriptionRecord.stripeSubscriptionId = subscription.id;
-      await subscriptionRecord.save();
-    }
-
-    // ✅ Calculate temporary dates (will be updated when Stripe subscription is created)
-    const now = new Date();
-    const tempEndDate = new Date(now);
-    // Set a temporary end date based on plan type
-    if (detectedPlanType === "yearly") {
-      tempEndDate.setFullYear(tempEndDate.getFullYear() + 1);
-    } else if (detectedPlanType === "monthly") {
-      tempEndDate.setMonth(tempEndDate.getMonth() + 1);
-    } else {
-      tempEndDate.setDate(tempEndDate.getDate() + 1);
-    }
-
-    let subscriptionRecord = await Subscription.findOne({
-      userId: user._id,
-      status: { $in: ["pending_payment", "in_progress"] } // ✅ Only check pending subscriptions
-    }).sort({ createdAt: -1 });
-
-    if (subscriptionRecord) {
-      // Update existing pending subscription
-      subscriptionRecord.stripeCustomerId = stripeCustomerId;
-      subscriptionRecord.priceId = priceId;
-      subscriptionRecord.amount = priceDetails.unit_amount / 100;
-      subscriptionRecord.currency = priceDetails.currency;
-      subscriptionRecord.planType = detectedPlanType;
-      subscriptionRecord.status = "pending_payment";
-      subscriptionRecord.stripePaymentIntentId = paymentIntent.id;
-      subscriptionRecord.startDate = now;
-      subscriptionRecord.endDate = tempEndDate;
-      await subscriptionRecord.save();
-    } else {
-      // ✅ Create new subscription - stripeSubscriptionId field ADD NA KARO
-      subscriptionRecord = await Subscription.create({
-        userId: user._id,
-        stripeCustomerId,
-        priceId,
-        amount: priceDetails.unit_amount / 100,
-        currency: priceDetails.currency,
-        planType: detectedPlanType,
-        status: "pending_payment",
-        stripePaymentIntentId: paymentIntent.id,
-        startDate: now,
-        endDate: tempEndDate
-        // ✅ stripeSubscriptionId field intentionally skip karo
-      });
-    }
-
-    // ✅ Create Ephemeral Key for Flutter PaymentSheet
+    // ✅ CREATE EPHEMERAL KEY FOR FLUTTER PAYMENTSHEET
     const ephemeralKey = await stripe.ephemeralKeys.create(
       { customer: stripeCustomerId },
       { apiVersion: '2023-10-16' }
@@ -272,20 +260,21 @@ export const selectPlan = async (req, res) => {
     await logSubscriptionLifecycle("PLAN_SELECTED_PAYMENT_INTENT", {
       priceId,
       planType: detectedPlanType,
-      paymentIntentId: paymentIntent.id
+      paymentIntentId: paymentIntent.id,
+      subscriptionId: subscriptionRecord._id
     }, user);
 
-    // ✅ Return EXACT fields you need
+    // ✅ RETURN RESPONSE
     return successResponse(res, "Complete payment to activate your subscription", {
-      // ✅ For Flutter Stripe SDK
+      // For Flutter Stripe SDK
       paymentIntentClientSecret: paymentIntent.client_secret,
       paymentIntentId: paymentIntent.id,
 
-      // ✅ For Flutter PaymentSheet
+      // For Flutter PaymentSheet
       customerId: stripeCustomerId,
       customerEphemeralKeySecret: ephemeralKey.secret,
 
-      // ✅ Subscription details
+      // Subscription details
       subscription: {
         id: subscriptionRecord._id,
         status: "pending_payment",
@@ -296,6 +285,7 @@ export const selectPlan = async (req, res) => {
 
       requiresPayment: true,
     });
+
   } catch (error) {
     console.error("❌ selectPlan error:", error);
 
