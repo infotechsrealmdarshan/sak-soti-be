@@ -1,0 +1,54 @@
+# ============================================
+# Server Configuration
+# ============================================
+PORT=3001
+NODE_ENV=development
+
+# ============================================
+# Database Configuration  
+# ============================================
+MONGO_URI=mongodb://localhost:27017/aa
+
+# ============================================
+# JWT Configuration (REQUIRED for Auth & Refresh Token)
+# ============================================
+JWT_SECRET=supersecretkey123
+JWT_ACCESS_TOKEN_EXPIRY=7d
+JWT_REFRESH_TOKEN_EXPIRY=30d
+
+# ============================================
+# Redis Configuration (Optional - for caching)
+# ============================================
+REDIS_HOST=localhost
+REDIS_PORT=6379
+
+# ============================================
+# Socket.IO Configuration
+# ============================================
+FRONTEND_URL=http://localhost:3000
+
+# ============================================
+# File Upload Limits (in MB)
+# ============================================
+IMAGE_MAX_MB=10
+VIDEO_MAX_MB=50
+AUDIO_MAX_MB=20
+PDF_MAX_MB=10
+   
+# Method 1: Service Account JSON File Path
+FIREBASE_SERVICE_ACCOUNT_PATH=./config/firebase-service-account.json
+   
+# OR Method 2: Environment Variables
+# FIREBASE_PROJECT_ID=your-project-id
+# FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+# FIREBASE_CLIENT_EMAIL=firebase-adminsdk@your-project.iam.gserviceaccount.com
+   
+# OR Method 3: JSON String
+# FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+
+# --------------------------
+# 🔑 STRIPE CONFIGURATION
+# --------------------------
+# Your Stripe API keys (from https://dashboard.stripe.com/test/apikeys)
+STRIPE_SECRET_KEY=sk_test_XXXXXXXXXXXXXXXXXXXXXXXX
+STRIPE_PUBLISHABLE_KEY=pk_test_XXXXXXXXXXXXXXXXXXXXXXXX
