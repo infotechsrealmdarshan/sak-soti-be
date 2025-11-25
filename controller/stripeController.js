@@ -185,6 +185,7 @@ export const selectPlan = async (req, res) => {
       setup_future_usage: 'off_session', // For subscriptions
       automatic_payment_methods: {
         enabled: true,
+        allow_redirects: 'never'
       },
       metadata: {
         userId: user._id.toString(),
