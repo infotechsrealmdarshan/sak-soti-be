@@ -205,13 +205,13 @@ export const selectPlan = async (req, res) => {
       tempEndDate.setDate(tempEndDate.getDate() + 1);
     }
 
-    // ✅ First, check if subscription already exists to avoid duplicates
     let subscriptionRecord = await Subscription.findOne({
-      userId: user._id
+      userId: user._id,
+      status: { $in: ["pending_payment", "in_progress"] } // ✅ Only check pending subscriptions
     }).sort({ createdAt: -1 });
 
     if (subscriptionRecord) {
-      // Update existing subscription (don't set stripeSubscriptionId - it will be set by webhook)
+      // Update existing pending subscription
       subscriptionRecord.stripeCustomerId = stripeCustomerId;
       subscriptionRecord.priceId = priceId;
       subscriptionRecord.amount = priceDetails.unit_amount / 100;
@@ -221,52 +221,22 @@ export const selectPlan = async (req, res) => {
       subscriptionRecord.stripePaymentIntentId = paymentIntent.id;
       subscriptionRecord.startDate = now;
       subscriptionRecord.endDate = tempEndDate;
-      // Don't modify stripeSubscriptionId if it exists
       await subscriptionRecord.save();
     } else {
-      // Create new subscription record
-      // Use create() instead of findOneAndUpdate to avoid index conflicts
-      try {
-        subscriptionRecord = await Subscription.create({
-          userId: user._id,
-          stripeCustomerId,
-          priceId,
-          amount: priceDetails.unit_amount / 100,
-          currency: priceDetails.currency,
-          planType: detectedPlanType,
-          status: "pending_payment",
-          stripePaymentIntentId: paymentIntent.id,
-          startDate: now,
-          endDate: tempEndDate
-          // stripeSubscriptionId is NOT set here - it will be null until Stripe creates it
-        });
-      } catch (createError) {
-        // If create fails due to duplicate, find existing record
-        if (createError.code === 11000) {
-          console.warn("⚠️ Duplicate detected during create, finding existing record...");
-          subscriptionRecord = await Subscription.findOne({
-            userId: user._id
-          }).sort({ createdAt: -1 });
-          
-          if (subscriptionRecord) {
-            // Update the found record
-            subscriptionRecord.stripeCustomerId = stripeCustomerId;
-            subscriptionRecord.priceId = priceId;
-            subscriptionRecord.amount = priceDetails.unit_amount / 100;
-            subscriptionRecord.currency = priceDetails.currency;
-            subscriptionRecord.planType = detectedPlanType;
-            subscriptionRecord.status = "pending_payment";
-            subscriptionRecord.stripePaymentIntentId = paymentIntent.id;
-            subscriptionRecord.startDate = now;
-            subscriptionRecord.endDate = tempEndDate;
-            await subscriptionRecord.save();
-          } else {
-            throw createError; // Re-throw if we can't find existing record
-          }
-        } else {
-          throw createError; // Re-throw non-duplicate errors
-        }
-      }
+      // ✅ Create new subscription - stripeSubscriptionId field ADD NA KARO
+      subscriptionRecord = await Subscription.create({
+        userId: user._id,
+        stripeCustomerId,
+        priceId,
+        amount: priceDetails.unit_amount / 100,
+        currency: priceDetails.currency,
+        planType: detectedPlanType,
+        status: "pending_payment",
+        stripePaymentIntentId: paymentIntent.id,
+        startDate: now,
+        endDate: tempEndDate
+        // ✅ stripeSubscriptionId field intentionally skip karo
+      });
     }
 
     // ✅ Create Ephemeral Key for Flutter PaymentSheet
@@ -304,31 +274,30 @@ export const selectPlan = async (req, res) => {
     });
   } catch (error) {
     console.error("❌ selectPlan error:", error);
-    
-    // ✅ Handle duplicate key errors specifically
+
     if (error.code === 11000) {
       const duplicateField = error.keyPattern ? Object.keys(error.keyPattern)[0] : 'unknown';
       console.error(`❌ Duplicate key error on field: ${duplicateField}`, error.keyValue);
-      
+
       // Get user ID from request
       const userId = req.user?.id || req.user?._id;
-      
+
       // Try to find and return existing subscription
       try {
         if (userId) {
           const existingSub = await Subscription.findOne({
             userId: userId
           }).sort({ createdAt: -1 });
-          
+
           if (existingSub) {
             const userForLog = await User.findById(userId);
             console.log(`✅ Found existing subscription for user: ${userForLog?.email || userId}`);
-            
+
             // If it's a pending subscription, return payment intent info
             if (existingSub.status === "pending_payment" || existingSub.status === "in_progress") {
               let paymentIntentClientSecret = null;
               let paymentIntentId = existingSub.stripePaymentIntentId;
-              
+
               if (paymentIntentId) {
                 try {
                   const existingPaymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
@@ -337,7 +306,7 @@ export const selectPlan = async (req, res) => {
                   console.warn("⚠️ Could not retrieve existing payment intent:", piError.message);
                 }
               }
-              
+
               return successResponse(res, "Subscription already in progress", {
                 paymentIntentClientSecret: paymentIntentClientSecret,
                 paymentIntentId: paymentIntentId,
@@ -362,10 +331,10 @@ export const selectPlan = async (req, res) => {
       } catch (findError) {
         console.error("❌ Error finding existing subscription:", findError);
       }
-      
+
       return errorResponse(res, "A subscription record already exists. Please try again or contact support.", 409);
     }
-    
+
     // Get user for logging
     let userForLog = null;
     try {
@@ -376,7 +345,7 @@ export const selectPlan = async (req, res) => {
     } catch (logError) {
       console.warn("⚠️ Could not fetch user for logging:", logError.message);
     }
-    
+
     await logSubscriptionLifecycle(
       "PLAN_SELECTION_FAILED",
       { error: error.message, code: error.code },
@@ -1295,7 +1264,7 @@ export const verifyCheckoutSession = async (req, res) => {
         payment_method: 'pm_card_visa', // Test card
       });
       console.log(`🔍 Test Payment Intent Status: ${confirmedIntent.status}`);
-      
+
       if (confirmedIntent.status !== 'succeeded') {
         return errorResponse(res, `Test payment failed. Status: ${confirmedIntent.status}`, 400);
       }
