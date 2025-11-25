@@ -456,7 +456,6 @@ export const stripeWebhook = async (req, res) => {
         const sub = eventData;
         console.log(`🎉 New subscription created: ${sub.id}`);
 
-        // ✅ SINGLE LOG ENTRY
         await logSubscriptionLifecycle(
           'SUBSCRIPTION_CREATED',
           sub,
@@ -471,26 +470,43 @@ export const stripeWebhook = async (req, res) => {
           const price = sub.items?.data?.[0]?.price;
           const { planType } = describePlan(price);
 
-          // ✅ UPDATE SUBSCRIPTION RECORD
-          await Subscription.findOneAndUpdate(
-            { userId: user._id },
-            {
-              stripeCustomerId: sub.customer,
-              stripeSubscriptionId: sub.id,
-              priceId: price?.id,
-              amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
-              currency: price?.currency,
-              planType,
-              status: sub.status,
-              startDate: new Date(sub.current_period_start * 1000),
-              endDate: new Date(sub.current_period_end * 1000),
-              currentPeriodStart: new Date(sub.current_period_start * 1000),
-              currentPeriodEnd: new Date(sub.current_period_end * 1000),
-            },
-            { upsert: true, new: true }
-          );
+          // ✅ PREVENT DUPLICATE RECORDS
+          const existingRecord = await Subscription.findOne({
+            stripeSubscriptionId: sub.id
+          });
 
-          console.log(`✅ Subscription record updated for user: ${user.email}`);
+          if (existingRecord) {
+            console.log(`ℹ️ Subscription ${sub.id} already exists, skipping creation`);
+            break;
+          }
+
+          // ✅ CHECK IF THIS IS RENEWAL OR NEW SUBSCRIPTION
+          const existingActiveSub = await Subscription.findOne({
+            userId: user._id,
+            status: "active"
+          });
+
+          const isRenewal = !!existingActiveSub;
+
+          // ✅ CREATE SUBSCRIPTION RECORD (ONLY HERE)
+          await Subscription.create({
+            userId: user._id,
+            stripeCustomerId: sub.customer,
+            stripeSubscriptionId: sub.id,
+            priceId: price?.id,
+            amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
+            currency: price?.currency,
+            planType,
+            status: sub.status, // This might be "active", "trialing", etc.
+            startDate: new Date(sub.current_period_start * 1000),
+            endDate: new Date(sub.current_period_end * 1000),
+            currentPeriodStart: new Date(sub.current_period_start * 1000),
+            currentPeriodEnd: new Date(sub.current_period_end * 1000),
+            isRenewalEntry: isRenewal,
+            originalSubscriptionId: isRenewal ? existingActiveSub.stripeSubscriptionId : null
+          });
+
+          console.log(`✅ ${isRenewal ? 'Renewal' : 'New'} subscription created for user: ${user.email}`);
         }
         break;
       }
@@ -499,7 +515,6 @@ export const stripeWebhook = async (req, res) => {
         const sub = eventData;
         console.log(`📝 Subscription updated: ${sub.id}, Status: ${sub.status}`);
 
-        // ✅ SINGLE LOG ENTRY
         await logSubscriptionLifecycle(
           'SUBSCRIPTION_UPDATED',
           sub,
@@ -516,55 +531,55 @@ export const stripeWebhook = async (req, res) => {
           const price = sub.items?.data?.[0]?.price;
           const { planType } = describePlan(price);
 
-          const updateData = {
-            status: sub.status,
-            startDate: new Date(sub.current_period_start * 1000), // ✅ Convert from seconds to Date
-            endDate: new Date(sub.current_period_end * 1000),     // ✅ Convert from seconds to Date
-            currentPeriodStart: new Date(sub.current_period_start * 1000),
-            currentPeriodEnd: new Date(sub.current_period_end * 1000),
-            cancelAtPeriodEnd: sub.cancel_at_period_end || false,
-          };
-
-          if (sub.cancel_at_period_end) {
-            updateData.status = "cancel_scheduled";
-            updateData.canceledAt = new Date();
-          }
-
-          // ✅ UPDATE SUBSCRIPTION RECORD
-          await Subscription.findOneAndUpdate(
-            { userId: user._id },
-            updateData,
-            { upsert: false }
-          );
-
-          // ✅ CRITICAL: UPDATE USER SUBSCRIPTION DATES FROM STRIPE
-          user.subscriptionStartDate = new Date(sub.current_period_start * 1000);
-          user.subscriptionEndDate = new Date(sub.current_period_end * 1000);
-
-          // Update subscription type if available
-          if (planType !== "unknown") {
-            user.subscriptionType = planType;
-          }
-
-          user.isSubscription = sub.status === "active" || sub.status === "trialing";
-
-          // Update last subscription date if this is a renewal
-          const previousAttributes = event.data.previous_attributes || {};
-          if (previousAttributes.current_period_start &&
-            previousAttributes.current_period_start !== sub.current_period_start) {
-            user.lastSubscriptionDate = new Date(); // Mark as renewal
-          }
-
-          await user.save();
-
-          console.log(`✅ User subscription dates updated: ${user.email}`, {
-            startDate: user.subscriptionStartDate,
-            endDate: user.subscriptionEndDate,
-            stripePeriod: {
-              current_period_start: sub.current_period_start,
-              current_period_end: sub.current_period_end
-            }
+          // ✅ FIND THE CORRECT SUBSCRIPTION RECORD
+          const subscriptionRecord = await Subscription.findOne({
+            stripeSubscriptionId: sub.id
           });
+
+          if (subscriptionRecord) {
+            const updateData = {
+              status: sub.status,
+              startDate: new Date(sub.current_period_start * 1000),
+              endDate: new Date(sub.current_period_end * 1000),
+              currentPeriodStart: new Date(sub.current_period_start * 1000),
+              currentPeriodEnd: new Date(sub.current_period_end * 1000),
+              cancelAtPeriodEnd: sub.cancel_at_period_end || false,
+            };
+
+            // ✅ HANDLE CANCELLATION/EXPIRY
+            if (sub.status === "canceled" || sub.status === "expired") {
+              updateData.isSubscriptionCancelled = true;
+              updateData.canceledAt = new Date();
+
+              // ✅ SET USER SUBSCRIPTION TO FALSE WHEN ACTUALLY ENDED
+              user.isSubscription = false;
+              user.isSubscriptionCancelled = true;
+              user.subscriptionCanceledAt = new Date();
+            } else if (sub.cancel_at_period_end) {
+              updateData.status = "cancel_scheduled";
+              updateData.canceledAt = new Date();
+              // ✅ SERVICE CONTINUES UNTIL PERIOD END
+              user.isSubscription = true;
+              user.isSubscriptionCancelled = true;
+            } else {
+              // ✅ ACTIVE SUBSCRIPTION
+              user.isSubscription = true;
+              user.isSubscriptionCancelled = false;
+            }
+
+            // Update subscription type if available
+            if (planType !== "unknown") {
+              user.subscriptionType = planType;
+            }
+
+            user.subscriptionStartDate = new Date(sub.current_period_start * 1000);
+            user.subscriptionEndDate = new Date(sub.current_period_end * 1000);
+
+            await subscriptionRecord.updateOne(updateData);
+            await user.save();
+
+            console.log(`✅ Subscription updated: ${sub.id}, Status: ${sub.status}`);
+          }
         }
         break;
       }
@@ -573,7 +588,6 @@ export const stripeWebhook = async (req, res) => {
         const invoice = eventData;
         const subscriptionId = invoice.subscription;
 
-        // ✅ SIMPLE LOGGING
         console.log(`💰 INVOICE PAYMENT SUCCEEDED:`, {
           invoiceId: invoice.id,
           subscriptionId: subscriptionId,
@@ -588,7 +602,6 @@ export const stripeWebhook = async (req, res) => {
               expand: ['items.data.price']
             });
 
-            // ✅ FIND USER - SIMPLE APPROACH
             let targetUser = await User.findOne({ stripeCustomerId: stripeSub.customer });
             if (!targetUser && stripeSub.metadata?.userId) {
               targetUser = await User.findById(stripeSub.metadata.userId);
@@ -602,17 +615,36 @@ export const stripeWebhook = async (req, res) => {
             const price = stripeSub.items?.data?.[0]?.price;
             const { planType } = describePlan(price);
 
-            // ✅ SIMPLE RENEWAL DETECTION
+            // ✅ IMPROVED RENEWAL DETECTION
             const isRenewal = invoice.billing_reason === "subscription_cycle" ||
-              invoice.billing_reason === "automatic_pending_invoice";
+              invoice.billing_reason === "subscription_update" ||
+              (invoice.billing_reason === "subscription_create" &&
+                await Subscription.exists({ userId: targetUser._id, status: "active" }));
 
             console.log(`🔄 Payment Type: ${isRenewal ? 'RENEWAL' : 'INITIAL'}`);
 
             if (isRenewal) {
-              // ✅ RENEWAL - UPDATE EXISTING RECORDS
+              // ✅ RENEWAL - CREATE NEW SUBSCRIPTION ENTRY
               console.log(`🔄 Subscription Renewed: ${stripeSub.id}`);
 
-              // Update User
+              await Subscription.create({
+                userId: targetUser._id,
+                stripeCustomerId: stripeSub.customer,
+                stripeSubscriptionId: stripeSub.id,
+                priceId: price?.id,
+                amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
+                currency: price?.currency,
+                planType: planType,
+                status: "active",
+                startDate: new Date(stripeSub.current_period_start * 1000),
+                endDate: new Date(stripeSub.current_period_end * 1000),
+                currentPeriodStart: new Date(stripeSub.current_period_start * 1000),
+                currentPeriodEnd: new Date(stripeSub.current_period_end * 1000),
+                isRenewalEntry: true,
+                latestInvoiceId: invoice.id,
+              });
+
+              // Update User with new period
               targetUser.subscriptionStartDate = new Date(stripeSub.current_period_start * 1000);
               targetUser.subscriptionEndDate = new Date(stripeSub.current_period_end * 1000);
               targetUser.lastSubscriptionDate = new Date();
@@ -620,37 +652,12 @@ export const stripeWebhook = async (req, res) => {
               targetUser.subscriptionType = planType;
               await targetUser.save();
 
-              // Update latest subscription record
-              await Subscription.findOneAndUpdate(
-                {
-                  userId: targetUser._id,
-                  stripeSubscriptionId: stripeSub.id
-                },
-                {
-                  status: "active",
-                  startDate: new Date(stripeSub.current_period_start * 1000),
-                  endDate: new Date(stripeSub.current_period_end * 1000),
-                  currentPeriodStart: new Date(stripeSub.current_period_start * 1000),
-                  currentPeriodEnd: new Date(stripeSub.current_period_end * 1000),
-                  latestInvoiceId: invoice.id,
-                }
-              );
-
               console.log(`✅ Renewal processed for: ${targetUser.email}`);
 
             } else {
-              // ✅ INITIAL PAYMENT - ACTIVATE SUBSCRIPTION
+              // ✅ INITIAL PAYMENT - ACTIVATE FIRST SUBSCRIPTION
               console.log(`✅ Initial subscription activated: ${stripeSub.id}`);
 
-              // Update User
-              targetUser.isSubscription = true;
-              targetUser.subscriptionType = planType;
-              targetUser.subscriptionStartDate = new Date(stripeSub.current_period_start * 1000);
-              targetUser.subscriptionEndDate = new Date(stripeSub.current_period_end * 1000);
-              targetUser.subscriptionActivatedAt = new Date();
-              await targetUser.save();
-
-              // Update Subscription record
               await Subscription.findOneAndUpdate(
                 {
                   userId: targetUser._id,
@@ -668,6 +675,14 @@ export const stripeWebhook = async (req, res) => {
                 },
                 { upsert: true }
               );
+
+              // Update User
+              targetUser.isSubscription = true;
+              targetUser.subscriptionType = planType;
+              targetUser.subscriptionStartDate = new Date(stripeSub.current_period_start * 1000);
+              targetUser.subscriptionEndDate = new Date(stripeSub.current_period_end * 1000);
+              targetUser.subscriptionActivatedAt = new Date();
+              await targetUser.save();
 
               console.log(`✅ User activated via webhook: ${targetUser.email}`);
             }
@@ -1313,7 +1328,7 @@ export const verifyCheckoutSession = async (req, res) => {
         status: 'active',
         limit: 1
       });
-      
+
       if (subscriptions.data.length > 0) {
         stripeSubscription = subscriptions.data[0];
         // Update the subscription record with the Stripe subscription ID
