@@ -187,6 +187,7 @@ export const selectPlan = async (req, res) => {
         enabled: true,
         allow_redirects: 'never'
       },
+      payment_method_types: ['card'],
       metadata: {
         userId: user._id.toString(),
         planType: detectedPlanType,
