@@ -429,20 +429,11 @@ export const stripeWebhook = async (req, res) => {
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let event;
 
-  // 🚨 CRITICAL: Use raw body for webhook verification
-  let rawBody = req.rawBody;
-  if (Buffer.isBuffer(rawBody)) {
-    rawBody = rawBody.toString('utf8');
-  }
+  console.log("🔔 Webhook received, raw body type:", typeof req.body);
+  console.log("🔔 Raw body is Buffer:", Buffer.isBuffer(req.body));
 
-  if (typeof rawBody !== 'string') {
-    try {
-      rawBody = JSON.stringify(rawBody);
-    } catch (stringifyError) {
-      console.error("❌ Could not stringify raw body:", stringifyError);
-      return res.status(400).send("Webhook Error: Invalid body format");
-    }
-  }
+  // ✅ Use the raw body directly (it's already a Buffer from middleware)
+  const rawBody = req.body.toString('utf8');
 
   if (!rawBody) {
     console.error("❌ No raw body available for webhook verification");
@@ -452,14 +443,18 @@ export const stripeWebhook = async (req, res) => {
   // ✅ Verify signature
   try {
     if (process.env.NODE_ENV !== "production") {
-      // ✅ Parse the JSON string to object
       event = JSON.parse(rawBody);
       console.log("⚠️ Webhook signature verification skipped (development mode)");
     } else {
-      // Production verification code...
+      // Production verification...
     }
+
+    console.log(`🔔 Processing event: ${event.type}`);
+
+    // ✅ Rest of your webhook code...
+
   } catch (err) {
-    console.error("❌ Webhook signature failed:", err.message);
+    console.error("❌ Webhook processing error:", err);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
