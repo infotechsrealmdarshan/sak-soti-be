@@ -182,7 +182,7 @@ export const selectPlan = async (req, res) => {
       amount: priceDetails.unit_amount,
       currency: priceDetails.currency,
       customer: stripeCustomerId,
-      setup_future_usage: 'off_session', // For subscriptions
+      setup_future_usage: 'off_session',
       automatic_payment_methods: {
         enabled: true,
         allow_redirects: 'never'
@@ -193,6 +193,29 @@ export const selectPlan = async (req, res) => {
         priceId: priceId
       }
     });
+
+    // ✅ ADD THIS: Create subscription linked to this payment
+    const subscription = await stripe.subscriptions.create({
+      customer: stripeCustomerId,
+      items: [{ price: priceId }],
+      payment_behavior: 'default_incomplete',
+      payment_settings: {
+        payment_method_types: ['card'],
+        save_default_payment_method: 'on_subscription'
+      },
+      expand: ['latest_invoice.payment_intent'],
+      metadata: {
+        userId: user._id.toString(),
+        planType: detectedPlanType,
+        originalPaymentIntentId: paymentIntent.id
+      }
+    });
+
+    // ✅ Update your subscription record with subscription ID
+    if (subscriptionRecord) {
+      subscriptionRecord.stripeSubscriptionId = subscription.id;
+      await subscriptionRecord.save();
+    }
 
     // ✅ Calculate temporary dates (will be updated when Stripe subscription is created)
     const now = new Date();
@@ -1323,26 +1346,34 @@ export const verifyCheckoutSession = async (req, res) => {
     }
 
     // ✅ Retrieve subscription (if it exists)
+    // ✅ Retrieve subscription (if it exists)
     let stripeSubscription;
     if (subscriptionRecord.stripeSubscriptionId) {
       stripeSubscription = await stripe.subscriptions.retrieve(
         subscriptionRecord.stripeSubscriptionId
       );
     } else {
-      // If no subscription ID yet, check if one was created for this customer
-      const subscriptions = await stripe.subscriptions.list({
+      // If no subscription ID yet, CREATE ONE
+      console.log("🔄 No subscription found, creating one...");
+
+      stripeSubscription = await stripe.subscriptions.create({
         customer: user.stripeCustomerId,
-        status: 'active',
-        limit: 1
+        items: [{ price: subscriptionRecord.priceId }],
+        payment_behavior: 'default_incomplete',
+        payment_settings: { payment_method_types: ['card'] },
+        backdate_start_date: Math.floor(Date.now() / 1000), // Start now
+        metadata: {
+          userId: user._id.toString(),
+          planType: subscriptionRecord.planType,
+          createdVia: 'manual_fix'
+        }
       });
 
-      if (subscriptions.data.length > 0) {
-        stripeSubscription = subscriptions.data[0];
-        // Update the subscription record with the Stripe subscription ID
-        subscriptionRecord.stripeSubscriptionId = stripeSubscription.id;
-      } else {
-        return errorResponse(res, "No active subscription found in Stripe", 404);
-      }
+      // Update the subscription record
+      subscriptionRecord.stripeSubscriptionId = stripeSubscription.id;
+      await subscriptionRecord.save();
+
+      console.log(`✅ Created subscription: ${stripeSubscription.id}`);
     }
 
     // Get plan type
