@@ -1300,45 +1300,16 @@ export const verifyCheckoutSession = async (req, res) => {
       return errorResponse(res, `Payment not completed. Status: ${paymentIntent.status}`, 400);
     }
 
-    // ✅ FIND OR CREATE SUBSCRIPTION
-    let subscriptionRecord = await Subscription.findOne({
+    // ✅ FIND SUBSCRIPTION RECORD USING PAYMENT INTENT ID
+    const subscriptionRecord = await Subscription.findOne({
       stripePaymentIntentId: paymentIntentId
     });
-
-    if (!subscriptionRecord) {
-      subscriptionRecord = await Subscription.findOne({
-        userId: userId,
-        status: { $in: ["pending_payment", "in_progress"] }
-      });
-    }
 
     if (!subscriptionRecord) {
       return errorResponse(res, "No subscription found for this payment intent", 404);
     }
 
-    // ✅ CREATE STRIPE SUBSCRIPTION WITHOUT BACKDATING
-    let stripeSubscription;
-    try {
-      stripeSubscription = await stripe.subscriptions.create({
-        customer: user.stripeCustomerId,
-        items: [
-          {
-            price: subscriptionRecord.stripePriceId, // Make sure this is set
-          },
-        ],
-        payment_behavior: 'default_incomplete',
-        payment_settings: { save_default_payment_method: 'on_subscription' },
-        expand: ['latest_invoice.payment_intent'],
-        // ❌ REMOVED: backdate_start_date parameter
-      });
-      
-      console.log(`✅ Stripe subscription created: ${stripeSubscription.id}`);
-    } catch (stripeError) {
-      console.error('❌ Stripe subscription creation failed:', stripeError);
-      // Continue with manual activation as fallback
-    }
-
-    // ✅ MANUALLY ACTIVATE SUBSCRIPTION IN YOUR DATABASE
+    // ✅ ACTIVATE SUBSCRIPTION IN YOUR DATABASE ONLY
     console.log(`✅ Activating subscription for user: ${user.email}`);
     
     // Update User
@@ -1367,7 +1338,6 @@ export const verifyCheckoutSession = async (req, res) => {
         startDate: new Date(),
         endDate: endDate,
         activatedAt: new Date(),
-        stripeSubscriptionId: stripeSubscription?.id || null,
       }
     );
 
@@ -1380,7 +1350,6 @@ export const verifyCheckoutSession = async (req, res) => {
         planType: subscriptionRecord.planType,
         startDate: new Date(),
         endDate: endDate,
-        stripeSubscriptionId: stripeSubscription?.id
       },
       user: {
         isSubscription: true,
