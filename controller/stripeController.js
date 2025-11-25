@@ -1258,32 +1258,30 @@ export const verifyCheckoutSession = async (req, res) => {
       return errorResponse(res, "paymentIntentId is required", 400);
     }
 
-    // ✅ FIX: Only in test mode, auto-confirm
-    if (process.env.NODE_ENV !== 'production') {
-      const confirmedIntent = await stripe.paymentIntents.confirm(paymentIntentId, {
-        payment_method: 'pm_card_visa', // Test card
-      });
-      console.log(`🔍 Test Payment Intent Status: ${confirmedIntent.status}`);
-
-      if (confirmedIntent.status !== 'succeeded') {
-        return errorResponse(res, `Test payment failed. Status: ${confirmedIntent.status}`, 400);
-      }
-    }
-
+    // ✅ REMOVE THE AUTO-CONFIRM BLOCK - JUST CHECK STATUS
     // Get user first
     const user = await User.findById(userId);
     if (!user) return errorResponse(res, "User not found", 404);
+
+    // ✅ Retrieve payment intent to check status (ONLY RETRIEVE, DON'T CONFIRM)
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    console.log(`🔍 [FLUTTER_PAYMENT] Payment Intent Status: ${paymentIntent.status}`);
+
+    // ✅ Check if payment is already succeeded
+    if (paymentIntent.status !== 'succeeded') {
+      return errorResponse(res, `Payment not completed. Status: ${paymentIntent.status}`, 400);
+    }
 
     // ✅ FIND SUBSCRIPTION BY PAYMENT INTENT ID OR USER ID
     let subscriptionRecord = await Subscription.findOne({
       stripePaymentIntentId: paymentIntentId
     });
 
-    // ✅ FALLBACK: If not found by paymentIntent, find by userId with in_progress status
+    // ✅ FALLBACK: If not found by paymentIntent, find by userId with pending status
     if (!subscriptionRecord) {
       subscriptionRecord = await Subscription.findOne({
         userId: userId,
-        status: "in_progress"
+        status: { $in: ["pending_payment", "in_progress"] }
       });
     }
 
@@ -1302,18 +1300,28 @@ export const verifyCheckoutSession = async (req, res) => {
       });
     }
 
-    // ✅ Retrieve payment intent to check status (ONCE)
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-    console.log(`🔍 [FLUTTER_PAYMENT] Final Payment Intent Status: ${paymentIntent.status}`);
-
-    if (paymentIntent.status !== 'succeeded') {
-      return errorResponse(res, `Payment not completed. Status: ${paymentIntent.status}`, 400);
+    // ✅ Retrieve subscription (if it exists)
+    let stripeSubscription;
+    if (subscriptionRecord.stripeSubscriptionId) {
+      stripeSubscription = await stripe.subscriptions.retrieve(
+        subscriptionRecord.stripeSubscriptionId
+      );
+    } else {
+      // If no subscription ID yet, check if one was created for this customer
+      const subscriptions = await stripe.subscriptions.list({
+        customer: user.stripeCustomerId,
+        status: 'active',
+        limit: 1
+      });
+      
+      if (subscriptions.data.length > 0) {
+        stripeSubscription = subscriptions.data[0];
+        // Update the subscription record with the Stripe subscription ID
+        subscriptionRecord.stripeSubscriptionId = stripeSubscription.id;
+      } else {
+        return errorResponse(res, "No active subscription found in Stripe", 404);
+      }
     }
-
-    // ✅ Retrieve subscription
-    const stripeSubscription = await stripe.subscriptions.retrieve(
-      subscriptionRecord.stripeSubscriptionId
-    );
 
     // Get plan type
     const price = stripeSubscription.items.data[0]?.price;
@@ -1330,9 +1338,10 @@ export const verifyCheckoutSession = async (req, res) => {
 
     // ✅ UPDATE SUBSCRIPTION RECORD
     await Subscription.findOneAndUpdate(
-      { stripePaymentIntentId: paymentIntentId },
+      { _id: subscriptionRecord._id },
       {
         status: "active",
+        stripeSubscriptionId: stripeSubscription.id,
         startDate: new Date(stripeSubscription.current_period_start * 1000),
         endDate: new Date(stripeSubscription.current_period_end * 1000),
         activatedAt: new Date(),
