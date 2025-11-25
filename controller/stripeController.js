@@ -420,10 +420,11 @@ export const stripeWebhook = async (req, res) => {
 
   // ✅ Verify signature
   try {
-    if (process.env.STRIPE_WEBHOOK_UNSAFE_TESTING === "true" && process.env.NODE_ENV !== "production") {
+    if (process.env.NODE_ENV !== "production") {
       event = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
-      console.log("⚠️ Webhook signature verification skipped (test mode)");
+      console.log("⚠️ Webhook signature verification skipped (development mode)");
     } else {
+      // Production ma ja verification karo
       if (!webhookSecret) {
         console.error("❌ Missing webhook secret");
         return res.status(500).send("Missing webhook secret");
