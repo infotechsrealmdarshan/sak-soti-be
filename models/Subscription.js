@@ -9,7 +9,7 @@ const subscriptionSchema = new mongoose.Schema(
     },
 
     stripeCustomerId: { type: String, required: true },
-    stripeSubscriptionId: { type: String, unique: true, sparse: true }, // Optional until Stripe subscription is created
+    stripeSubscriptionId: { type: String}, // Optional until Stripe subscription is created
     stripePaymentIntentId: { type: String },
     priceId: { type: String, required: true },
     amount: { type: Number, required: true },
