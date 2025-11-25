@@ -453,60 +453,65 @@ export const stripeWebhook = async (req, res) => {
 
     switch (event.type) {
       case "customer.subscription.created": {
-        const sub = eventData;
-        console.log(`🎉 New subscription created: ${sub.id}`);
+        try {
+          const sub = eventData;
+          console.log(`🎉 New subscription created: ${sub.id}`);
 
-        await logSubscriptionLifecycle(
-          'SUBSCRIPTION_CREATED',
-          sub,
-          user,
-          {
-            webhookEvent: event.type,
-            status: sub.status
+          await logSubscriptionLifecycle(
+            'SUBSCRIPTION_CREATED',
+            sub,
+            user,
+            {
+              webhookEvent: event.type,
+              status: sub.status
+            }
+          );
+
+          if (user) {
+            const price = sub.items?.data?.[0]?.price;
+            const { planType } = describePlan(price);
+
+            // ✅ PREVENT DUPLICATE RECORDS
+            const existingRecord = await Subscription.findOne({
+              stripeSubscriptionId: sub.id
+            });
+
+            if (existingRecord) {
+              console.log(`ℹ️ Subscription ${sub.id} already exists, skipping creation`);
+              break;
+            }
+
+            // ✅ CHECK IF THIS IS RENEWAL OR NEW SUBSCRIPTION
+            const existingActiveSub = await Subscription.findOne({
+              userId: user._id,
+              status: "active"
+            });
+
+            const isRenewal = !!existingActiveSub;
+
+            // ✅ CREATE SUBSCRIPTION RECORD (ONLY HERE)
+            await Subscription.create({
+              userId: user._id,
+              stripeCustomerId: sub.customer,
+              stripeSubscriptionId: sub.id,
+              priceId: price?.id,
+              amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
+              currency: price?.currency,
+              planType,
+              status: sub.status, // This might be "active", "trialing", etc.
+              startDate: new Date(sub.current_period_start * 1000),
+              endDate: new Date(sub.current_period_end * 1000),
+              currentPeriodStart: new Date(sub.current_period_start * 1000),
+              currentPeriodEnd: new Date(sub.current_period_end * 1000),
+              isRenewalEntry: isRenewal,
+              originalSubscriptionId: isRenewal ? existingActiveSub.stripeSubscriptionId : null
+            });
+
+            console.log(`✅ ${isRenewal ? 'Renewal' : 'New'} subscription created for user: ${user.email}`);
           }
-        );
-
-        if (user) {
-          const price = sub.items?.data?.[0]?.price;
-          const { planType } = describePlan(price);
-
-          // ✅ PREVENT DUPLICATE RECORDS
-          const existingRecord = await Subscription.findOne({
-            stripeSubscriptionId: sub.id
-          });
-
-          if (existingRecord) {
-            console.log(`ℹ️ Subscription ${sub.id} already exists, skipping creation`);
-            break;
-          }
-
-          // ✅ CHECK IF THIS IS RENEWAL OR NEW SUBSCRIPTION
-          const existingActiveSub = await Subscription.findOne({
-            userId: user._id,
-            status: "active"
-          });
-
-          const isRenewal = !!existingActiveSub;
-
-          // ✅ CREATE SUBSCRIPTION RECORD (ONLY HERE)
-          await Subscription.create({
-            userId: user._id,
-            stripeCustomerId: sub.customer,
-            stripeSubscriptionId: sub.id,
-            priceId: price?.id,
-            amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
-            currency: price?.currency,
-            planType,
-            status: sub.status, // This might be "active", "trialing", etc.
-            startDate: new Date(sub.current_period_start * 1000),
-            endDate: new Date(sub.current_period_end * 1000),
-            currentPeriodStart: new Date(sub.current_period_start * 1000),
-            currentPeriodEnd: new Date(sub.current_period_end * 1000),
-            isRenewalEntry: isRenewal,
-            originalSubscriptionId: isRenewal ? existingActiveSub.stripeSubscriptionId : null
-          });
-
-          console.log(`✅ ${isRenewal ? 'Renewal' : 'New'} subscription created for user: ${user.email}`);
+        } catch (error) {
+          console.error(`❌ Error in ${event.type}:`, error);
+          await logSubscriptionLifecycle('WEBHOOK_CASE_ERROR', { error: error.message }, user);
         }
         break;
       }
