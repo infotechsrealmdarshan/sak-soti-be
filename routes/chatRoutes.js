@@ -4,7 +4,7 @@ import subscriptionRequired from "../middlewares/subscription.js";
 import { uploadMedia, uploadLimitErrorHandler } from "../middlewares/uploadMedia.js";
 import { actOnChatRequest, getRequestsByType, sendChatRequest } from "../controller/chatController/chatRequestController.js";
 import { createGroupViaJson, deleteGroupByCreator, updateGroupByCreator, updateGroupProfileByCreator } from "../controller/chatController/groupController.js";
-import { getChatMessages, sendChatMessage, uploadChatMedia } from "../controller/chatController/chatController.js";
+import { getChatMessages, getUsersForCreateGroup, sendChatMessage, uploadChatMedia } from "../controller/chatController/chatController.js";
 import { deleteChatMessagesBulk, editMessage } from "../controller/chatController/updateChatController.js";
 
 const router = express.Router();
@@ -480,5 +480,42 @@ router.put(
   updateGroupProfileByCreator,
   uploadLimitErrorHandler
 );
+
+/**
+ * @swagger
+ * /api/chat/users/group-creation:
+ *   get:
+ *     tags: [Chat]
+ *     summary: Get users for group creation with search and pagination
+ *     description: Fetch users excluding current user for group member selection
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search by first name, last name, email, or full name
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number for pagination
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of users per page
+ *     responses:
+ *       200:
+ *         description: Users fetched successfully
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Internal server error
+ */
+router.get("/users/group-creation", auth, subscriptionRequired, getUsersForCreateGroup);
 
 export default router;
