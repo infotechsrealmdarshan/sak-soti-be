@@ -760,3 +760,81 @@ export const getChatMessages = asyncHandler(async (req, res) => {
 
   return successResponse(res, "Messages fetched", data, pagination, 200, 1);
 });
+
+export const getUsersForCreateGroup = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const search = req.query.search ? req.query.search.trim() : "";
+  const skip = (page - 1) * limit;
+
+  if (!userId) {
+    return errorResponse(res, "User not authenticated", 401);
+  }
+
+  // Build search query - exclude current user and deleted users
+  let searchQuery = { 
+    _id: { $ne: userId }, // Exclude current user
+    isDeleted: { $ne: true } // Exclude deleted users
+  };
+
+  if (search) {
+    const searchRegex = new RegExp(search, 'i');
+    searchQuery.$or = [
+      { firstname: searchRegex },
+      { lastname: searchRegex },
+      { email: searchRegex },
+      { 
+        $expr: {
+          $regexMatch: {
+            input: { $concat: ["$firstname", " ", "$lastname"] },
+            regex: search,
+            options: "i"
+          }
+        }
+      }
+    ];
+  }
+
+  try {
+    // Get total count for pagination
+    const totalUsers = await User.countDocuments(searchQuery);
+
+    // Get users with pagination
+    const users = await User.find(searchQuery)
+      .select('firstname lastname email profileimg')
+      .sort({ firstname: 1, lastname: 1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // Format response
+    const formattedUsers = users.map(user => ({
+      _id: user._id,
+      firstname: user.firstname || "",
+      lastname: user.lastname || "",
+      email: user.email,
+      profileimg: user.profileimg || "/uploads/default.png",
+      fullName: `${user.firstname || ""} ${user.lastname || ""}`.trim()
+    }));
+
+    const pagination = {
+      currentPage: page,
+      totalPages: Math.ceil(totalUsers / limit),
+      totalItems: totalUsers,
+      itemsPerPage: limit,
+      hasNext: page < Math.ceil(totalUsers / limit),
+      hasPrev: page > 1
+    };
+
+    const data = {
+      users: formattedUsers
+    };
+
+    return successResponse(res, "Users fetched successfully for group creation", data, pagination, 200, 1);
+
+  } catch (error) {
+    console.error("Error fetching users for group creation:", error.message);
+    return errorResponse(res, "Failed to fetch users", 500);
+  }
+});
