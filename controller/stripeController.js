@@ -174,7 +174,7 @@ export const selectPlan = async (req, res) => {
       return errorResponse(res, "Could not determine price ID", 400);
     }
 
-    // Validate price
+    // Validate price - CRITICAL: Check if it's a recurring price
     let priceDetails;
     try {
       priceDetails = await stripe.prices.retrieve(priceId, { expand: ["product"] });
@@ -182,105 +182,91 @@ export const selectPlan = async (req, res) => {
       return errorResponse(res, "Invalid price ID", 400);
     }
 
+    // ✅ CHECK: Make sure this is a RECURRING price for subscriptions
+    if (!priceDetails.recurring) {
+      return errorResponse(res, "This price is not configured for subscriptions. Please use a recurring price.", 400);
+    }
+
     const { planType: detectedPlanType } = describePlan(priceDetails, priceDetails.product);
 
-    // ✅ CREATE SUBSCRIPTION RECORD FIRST (BEFORE payment intent)
-    const now = new Date();
-    const tempEndDate = new Date(now);
-    
-    // Set temporary end date based on plan type
-    if (detectedPlanType === "yearly") {
-      tempEndDate.setFullYear(tempEndDate.getFullYear() + 1);
-    } else if (detectedPlanType === "monthly") {
-      tempEndDate.setMonth(tempEndDate.getMonth() + 1);
-    } else {
-      tempEndDate.setDate(tempEndDate.getDate() + 1);
-    }
+    console.log(`🔄 Creating subscription for customer: ${stripeCustomerId}, price: ${priceId}`);
 
-    // Check for existing pending subscription
-    let subscriptionRecord = await Subscription.findOne({
-      userId: user._id,
-      status: { $in: ["pending_payment", "in_progress"] }
-    }).sort({ createdAt: -1 });
-
-    if (subscriptionRecord) {
-      // Update existing pending subscription
-      subscriptionRecord.stripeCustomerId = stripeCustomerId;
-      subscriptionRecord.priceId = priceId;
-      subscriptionRecord.amount = priceDetails.unit_amount / 100;
-      subscriptionRecord.currency = priceDetails.currency;
-      subscriptionRecord.planType = detectedPlanType;
-      subscriptionRecord.status = "pending_payment";
-      subscriptionRecord.startDate = now;
-      subscriptionRecord.endDate = tempEndDate;
-      await subscriptionRecord.save();
-    } else {
-      // Create new subscription record
-      subscriptionRecord = await Subscription.create({
-        userId: user._id,
-        stripeCustomerId,
-        priceId,
-        amount: priceDetails.unit_amount / 100,
-        currency: priceDetails.currency,
-        planType: detectedPlanType,
-        status: "pending_payment",
-        startDate: now,
-        endDate: tempEndDate
-      });
-    }
-
-    // ✅ NOW CREATE PAYMENT INTENT (after subscriptionRecord is defined)
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: priceDetails.unit_amount,
-      currency: priceDetails.currency,
+    // ✅ CRITICAL FIX: CREATE SUBSCRIPTION (not payment intent)
+    const subscription = await stripe.subscriptions.create({
       customer: stripeCustomerId,
-      setup_future_usage: 'off_session',
-      automatic_payment_methods: {
-        enabled: true,
-        allow_redirects: 'never'
+      items: [
+        {
+          price: priceId, // This must be a recurring price
+        },
+      ],
+      payment_behavior: 'default_incomplete', // Allows subscription to be created with pending payment
+      payment_settings: {
+        save_default_payment_method: 'on_subscription',
+        payment_method_types: ['card'],
       },
+      expand: ['latest_invoice.payment_intent'],
       metadata: {
         userId: user._id.toString(),
         planType: detectedPlanType,
-        priceId: priceId,
-        subscriptionId: subscriptionRecord._id.toString() // ✅ Now subscriptionRecord is defined
+        userEmail: user.email
       }
     });
 
-    // ✅ UPDATE SUBSCRIPTION RECORD WITH PAYMENT INTENT ID
-    subscriptionRecord.stripePaymentIntentId = paymentIntent.id;
-    await subscriptionRecord.save();
+    console.log(`✅ Subscription created: ${subscription.id}`);
+    console.log(`📊 Subscription status: ${subscription.status}`);
+    console.log(`💰 Payment Intent: ${subscription.latest_invoice.payment_intent.id}`);
 
-    // ✅ CREATE EPHEMERAL KEY FOR FLUTTER PAYMENTSHEET
+    // ✅ CREATE SUBSCRIPTION RECORD IN OUR DATABASE
+    const subscriptionRecord = await Subscription.create({
+      userId: user._id,
+      stripeCustomerId: stripeCustomerId,
+      stripeSubscriptionId: subscription.id, // This is the actual subscription ID
+      priceId: priceId,
+      amount: priceDetails.unit_amount / 100,
+      currency: priceDetails.currency,
+      planType: detectedPlanType,
+      status: subscription.status, // 'incomplete', 'active', etc.
+      startDate: new Date(subscription.current_period_start * 1000),
+      endDate: new Date(subscription.current_period_end * 1000),
+      currentPeriodStart: new Date(subscription.current_period_start * 1000),
+      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
+      stripePaymentIntentId: subscription.latest_invoice.payment_intent.id
+    });
+
+    // ✅ CREATE EPHEMERAL KEY FOR FLUTTER
     const ephemeralKey = await stripe.ephemeralKeys.create(
       { customer: stripeCustomerId },
       { apiVersion: '2023-10-16' }
     );
 
-    await logSubscriptionLifecycle("PLAN_SELECTED_PAYMENT_INTENT", {
-      priceId,
+    await logSubscriptionLifecycle("SUBSCRIPTION_CREATED_PENDING_PAYMENT", {
+      subscriptionId: subscription.id,
+      priceId: priceId,
       planType: detectedPlanType,
-      paymentIntentId: paymentIntent.id,
-      subscriptionId: subscriptionRecord._id
+      paymentIntentId: subscription.latest_invoice.payment_intent.id,
+      status: subscription.status
     }, user);
 
-    // ✅ RETURN RESPONSE
-    return successResponse(res, "Complete payment to activate your subscription", {
+    // ✅ RETURN RESPONSE WITH SUBSCRIPTION DATA
+    return successResponse(res, "Subscription created. Complete payment to activate.", {
       // For Flutter Stripe SDK
-      paymentIntentClientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
+      paymentIntentClientSecret: subscription.latest_invoice.payment_intent.client_secret,
+      paymentIntentId: subscription.latest_invoice.payment_intent.id,
 
       // For Flutter PaymentSheet
       customerId: stripeCustomerId,
       customerEphemeralKeySecret: ephemeralKey.secret,
 
-      // Subscription details
+      // Subscription details (NEW - so frontend knows about the subscription)
       subscription: {
         id: subscriptionRecord._id,
-        status: "pending_payment",
+        stripeSubscriptionId: subscription.id, // The actual Stripe subscription ID
+        status: subscription.status,
         planType: detectedPlanType,
         amount: priceDetails.unit_amount / 100,
         currency: priceDetails.currency,
+        currentPeriodStart: new Date(subscription.current_period_start * 1000),
+        currentPeriodEnd: new Date(subscription.current_period_end * 1000),
       },
 
       requiresPayment: true,
@@ -288,66 +274,6 @@ export const selectPlan = async (req, res) => {
 
   } catch (error) {
     console.error("❌ selectPlan error:", error);
-
-    if (error.code === 11000) {
-      const duplicateField = error.keyPattern ? Object.keys(error.keyPattern)[0] : 'unknown';
-      console.error(`❌ Duplicate key error on field: ${duplicateField}`, error.keyValue);
-
-      // Get user ID from request
-      const userId = req.user?.id || req.user?._id;
-
-      // Try to find and return existing subscription
-      try {
-        if (userId) {
-          const existingSub = await Subscription.findOne({
-            userId: userId
-          }).sort({ createdAt: -1 });
-
-          if (existingSub) {
-            const userForLog = await User.findById(userId);
-            console.log(`✅ Found existing subscription for user: ${userForLog?.email || userId}`);
-
-            // If it's a pending subscription, return payment intent info
-            if (existingSub.status === "pending_payment" || existingSub.status === "in_progress") {
-              let paymentIntentClientSecret = null;
-              let paymentIntentId = existingSub.stripePaymentIntentId;
-
-              if (paymentIntentId) {
-                try {
-                  const existingPaymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-                  paymentIntentClientSecret = existingPaymentIntent.client_secret;
-                } catch (piError) {
-                  console.warn("⚠️ Could not retrieve existing payment intent:", piError.message);
-                }
-              }
-
-              return successResponse(res, "Subscription already in progress", {
-                paymentIntentClientSecret: paymentIntentClientSecret,
-                paymentIntentId: paymentIntentId,
-                subscription: {
-                  id: existingSub._id,
-                  status: existingSub.status,
-                  planType: existingSub.planType,
-                },
-                message: "Please complete the existing payment or wait for it to process"
-              });
-            } else {
-              return successResponse(res, "You already have a subscription", {
-                subscription: {
-                  id: existingSub._id,
-                  status: existingSub.status,
-                  planType: existingSub.planType,
-                }
-              });
-            }
-          }
-        }
-      } catch (findError) {
-        console.error("❌ Error finding existing subscription:", findError);
-      }
-
-      return errorResponse(res, "A subscription record already exists. Please try again or contact support.", 409);
-    }
 
     // Get user for logging
     let userForLog = null;
@@ -361,15 +287,27 @@ export const selectPlan = async (req, res) => {
     }
 
     await logSubscriptionLifecycle(
-      "PLAN_SELECTION_FAILED",
-      { error: error.message, code: error.code },
+      "SUBSCRIPTION_CREATION_FAILED",
+      { 
+        error: error.message, 
+        code: error.code,
+        type: error.type 
+      },
       userForLog,
       {
         apiSource: "selectPlan",
         stack: error.stack,
       }
     );
-    return errorResponse(res, "Error selecting plan: " + error.message, 500);
+    
+    // Better error messages for common Stripe errors
+    if (error.code === 'price_invalid') {
+      return errorResponse(res, "Invalid price configuration. Please contact support.", 400);
+    } else if (error.type === 'StripeInvalidRequestError') {
+      return errorResponse(res, "Stripe configuration error: " + error.message, 400);
+    }
+    
+    return errorResponse(res, "Error creating subscription: " + error.message, 500);
   }
 };
 
@@ -1309,34 +1247,34 @@ export const verifyCheckoutSession = async (req, res) => {
       return errorResponse(res, "No subscription found for this payment intent", 404);
     }
 
-    // ✅ ACTIVATE SUBSCRIPTION IN YOUR DATABASE ONLY
+    // ✅ RETRIEVE THE STRIPE SUBSCRIPTION TO GET ACTUAL DATES
+    let stripeSubscription;
+    try {
+      stripeSubscription = await stripe.subscriptions.retrieve(subscriptionRecord.stripeSubscriptionId);
+    } catch (error) {
+      console.error("❌ Error retrieving Stripe subscription:", error);
+      return errorResponse(res, "Error retrieving subscription details", 500);
+    }
+
+    // ✅ ACTIVATE SUBSCRIPTION USING ACTUAL STRIPE DATES
     console.log(`✅ Activating subscription for user: ${user.email}`);
-    
-    // Update User
+
+    // Update User with actual Stripe dates
     user.isSubscription = true;
     user.subscriptionType = subscriptionRecord.planType;
-    user.subscriptionStartDate = new Date();
-    
-    // Set end date based on plan type
-    const endDate = new Date();
-    if (subscriptionRecord.planType === "yearly") {
-      endDate.setFullYear(endDate.getFullYear() + 1);
-    } else if (subscriptionRecord.planType === "monthly") {
-      endDate.setMonth(endDate.getMonth() + 1);
-    } else {
-      endDate.setDate(endDate.getDate() + 1);
-    }
-    user.subscriptionEndDate = endDate;
-    
+    user.subscriptionStartDate = new Date(stripeSubscription.current_period_start * 1000);
+    user.subscriptionEndDate = new Date(stripeSubscription.current_period_end * 1000);
     await user.save();
 
-    // Update Subscription record
+    // Update Subscription record with actual Stripe dates
     await Subscription.findOneAndUpdate(
       { _id: subscriptionRecord._id },
       {
-        status: "active",
-        startDate: new Date(),
-        endDate: endDate,
+        status: stripeSubscription.status,
+        startDate: new Date(stripeSubscription.current_period_start * 1000),
+        endDate: new Date(stripeSubscription.current_period_end * 1000),
+        currentPeriodStart: new Date(stripeSubscription.current_period_start * 1000),
+        currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
         activatedAt: new Date(),
       }
     );
@@ -1346,10 +1284,11 @@ export const verifyCheckoutSession = async (req, res) => {
     return successResponse(res, "Subscription activated successfully!", {
       subscription: {
         id: subscriptionRecord._id,
-        status: "active",
+        stripeSubscriptionId: subscriptionRecord.stripeSubscriptionId,
+        status: stripeSubscription.status,
         planType: subscriptionRecord.planType,
-        startDate: new Date(),
-        endDate: endDate,
+        startDate: new Date(stripeSubscription.current_period_start * 1000),
+        endDate: new Date(stripeSubscription.current_period_end * 1000),
       },
       user: {
         isSubscription: true,
