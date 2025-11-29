@@ -754,16 +754,12 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
 
   const pickLastVisibleMessageForUser = (conversation) => {
     if (!conversation || !Array.isArray(conversation.messages)) {
-      return { lastMessage: null, lastMessageTimestamp: null };
+      return { lastMessage: null, lastMessageTimestamp: null }; // ✅ Ensure both are null
     }
 
     const userAllowed = !!(user.isSubscription || user.isAdmin);
     if (!userAllowed) {
-      return errorResponse(
-        res,
-        "You must have an active subscription (or be an admin) to view chat requests",
-        403
-      );
+      return { lastMessage: null, lastMessageTimestamp: null }; // ✅ Ensure both are null
     }
 
     const deletedForCurrentUser = new Set();
@@ -838,316 +834,347 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       };
     }
 
+    // ✅ FIX: Return both as null when no visible messages found
     return { lastMessage: null, lastMessageTimestamp: null };
   };
 
   // ========== GROUP CHAT HANDLING (EXISTING CODE - NO CHANGES) ==========
- if (type === "group") {
-  const cacheKey = `requests:${String(userId)}:group:page:${page}:limit:${limit}:search:${search}`;
-  const cached = await redisClient.get(cacheKey);
-  if (cached) {
-    const parsed = JSON.parse(cached);
-    return successResponse(res, parsed.message, parsed.data, parsed.pagination, 200, 1);
-  }
+  if (type === "group") {
+    // ✅ ADD: Check user subscription for group access
+    const user = await User.findById(userId).select("isSubscription isAdmin");
+    if (!user) return errorResponse(res, "User not found", 404);
 
-  let groupQuery = {
-    chatType: 'group',
-    receiverId: null,
-    $or: [
-      { groupAdmin: userId },
-      { superAdmins: userId },
-      { members: userId }
-    ]
-  };
-
-  if (search) {
-    groupQuery.name = { $regex: search, $options: "i" };
-  }
-
-  const totalGroups = await ChatRequest.countDocuments(groupQuery);
-  const groups = await ChatRequest.find(groupQuery)
-    .populate([
-      { path: "senderId", select: "firstname lastname email profileimg isDeleted" },
-      { path: "groupAdmin", select: "firstname lastname email profileimg isDeleted" },
-      { path: "superAdmins", select: "firstname lastname email profileimg isDeleted" },
-      { path: "members", select: "firstname lastname email profileimg isDeleted" }
-    ])
-    .sort({ updatedAt: -1 })
-    .skip(skip)
-    .limit(limit);
-
-  console.log('=== GROUP DATA DEBUG ===');
-  groups.forEach((group, index) => {
-    console.log(`Group ${index + 1}: ${group._id}`);
-    console.log('  Raw senderId:', group.senderId);
-    console.log('  Raw groupAdmin:', group.groupAdmin);
-    console.log('  senderId is ObjectId:', group.senderId instanceof mongoose.Types.ObjectId);
-    console.log('  groupAdmin is ObjectId:', group.groupAdmin instanceof mongoose.Types.ObjectId);
-    console.log('  senderId string:', String(group.senderId));
-    console.log('  groupAdmin string:', String(group.groupAdmin));
-  });
-  console.log('=== END DEBUG ===');
-
-  console.log('=== DATABASE STRUCTURE DEBUG ===');
-  groups.forEach((group, index) => {
-    console.log(`Group ${index + 1}: ${group._id}`);
-    console.log('  All fields:', Object.keys(group.toObject ? group.toObject() : group));
-    console.log('  senderId in DB:', group.senderId);
-    console.log('  groupAdmin in DB:', group.groupAdmin);
-    console.log('  raw document:', JSON.stringify(group, null, 2).substring(0, 500)); // First 500 chars
-  });
-  console.log('=== END STRUCTURE DEBUG ===');
-
-  // ✅ Remove deleted users from groups automatically and filter out groups with deleted admins
-  const validGroups = groups.filter(group =>
-    !(group.groupAdmin && group.groupAdmin.isDeleted === true)
-  );
-
-  for (const group of groups) {
-    // ✅ If groupAdmin is deleted, the group should have been deleted automatically
-    // This check is just a safety net - if we find a deleted admin, skip this group
-    if (group.groupAdmin && group.groupAdmin.isDeleted === true) {
-      console.warn(`⚠️ Found group ${group._id} with deleted admin - should have been deleted. Skipping.`);
-      continue; // Skip this group
+    const userAllowed = !!(user.isSubscription || user.isAdmin);
+    if (!userAllowed) {
+      return errorResponse(
+        res,
+        "You must have an active subscription (or be an admin) to view group chats",
+        403
+      );
     }
 
-    // Filter deleted users from members
-    if (group.members && Array.isArray(group.members)) {
-      const deletedMemberIds = [];
-      group.members = group.members.filter(member => {
-        if (member && member.isDeleted === true) {
-          deletedMemberIds.push(String(member._id));
-          return false;
-        }
-        return true;
-      });
-
-      // If deleted users were found, remove them from the group
-      if (deletedMemberIds.length > 0) {
-        const deletedObjectIds = deletedMemberIds.map(id =>
-          mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
-        );
-        await ChatRequest.findByIdAndUpdate(group._id, {
-          $pull: { members: { $in: deletedObjectIds } }
-        });
-        // Also remove from superAdmins if they were there
-        await ChatRequest.findByIdAndUpdate(group._id, {
-          $pull: { superAdmins: { $in: deletedObjectIds } }
-        });
-      }
+    const cacheKey = `requests:${String(userId)}:group:page:${page}:limit:${limit}:search:${search}`;
+    const cached = await redisClient.get(cacheKey);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      return successResponse(res, parsed.message, parsed.data, parsed.pagination, 200, 1);
     }
 
-    // Filter deleted users from superAdmins
-    if (group.superAdmins && Array.isArray(group.superAdmins)) {
-      const deletedAdminIds = [];
-      group.superAdmins = group.superAdmins.filter(admin => {
-        if (admin && admin.isDeleted === true) {
-          deletedAdminIds.push(String(admin._id));
-          return false;
-        }
-        return true;
-      });
+    let groupQuery = {
+      chatType: 'group',
+      receiverId: null,
+      $or: [
+        { groupAdmin: userId },
+        { superAdmins: userId },
+        { members: userId }
+      ]
+    };
 
-      if (deletedAdminIds.length > 0) {
-        const deletedObjectIds = deletedAdminIds.map(id =>
-          mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
-        );
-        await ChatRequest.findByIdAndUpdate(group._id, {
-          $pull: { superAdmins: { $in: deletedObjectIds } }
-        });
-      }
+    if (search) {
+      groupQuery.name = { $regex: search, $options: "i" };
     }
 
-    validGroups.push(group);
-  }
+    const totalGroups = await ChatRequest.countDocuments(groupQuery);
+    const groups = await ChatRequest.find(groupQuery)
+      .populate([
+        { path: "senderId", select: "firstname lastname email profileimg isDeleted" },
+        { path: "groupAdmin", select: "firstname lastname email profileimg isDeleted" },
+        { path: "superAdmins", select: "firstname lastname email profileimg isDeleted" },
+        { path: "members", select: "firstname lastname email profileimg isDeleted" }
+      ])
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limit);
 
-  // Replace groups array with valid groups only
-  groups.length = 0;
-  groups.push(...validGroups);
-
-  const groupIds = groups.map(g => g._id.toString());
-  const conversations = await ChatConversation.find({ chatRequestId: { $in: groupIds } })
-    .populate({ path: "messages.sender", select: "firstname lastname email profileimg" });
-  const convoMap = new Map(conversations.map(c => [c.chatRequestId.toString(), c]));
-
-  // ✅ Get current user data BEFORE the map function
-  const currentUser = await User.findById(userId).select("firstname lastname email profileimg isDeleted");
-  
-  // ✅ Create a fallback user object in case currentUser is null
-  const fallbackUser = {
-    _id: userId,
-    firstname: "Current",
-    lastname: "User",
-    email: "",
-    profileimg: "/uploads/default.png",
-    isDeleted: false
-  };
-
-  const data = groups.map(g => {
-    const creatorIdStr = g.groupAdmin?._id?.toString();
-    const adminIdSet = new Set((g.superAdmins || []).map(a => a._id.toString()));
-    const filteredMembers = (g.members || []).filter(m => {
-      if (!m) return false;
-      // Filter out deleted users
-      if (m.isDeleted === true) return false;
-      const mid = m._id.toString();
-      return mid !== creatorIdStr && !adminIdSet.has(mid);
+    console.log('=== GROUP DATA DEBUG ===');
+    groups.forEach((group, index) => {
+      console.log(`Group ${index + 1}: ${group._id}`);
+      console.log('  Raw senderId:', group.senderId);
+      console.log('  Raw groupAdmin:', group.groupAdmin);
+      console.log('  senderId is ObjectId:', group.senderId instanceof mongoose.Types.ObjectId);
+      console.log('  groupAdmin is ObjectId:', group.groupAdmin instanceof mongoose.Types.ObjectId);
+      console.log('  senderId string:', String(group.senderId));
+      console.log('  groupAdmin string:', String(group.groupAdmin));
     });
+    console.log('=== END DEBUG ===');
 
-    const allUniqueUserIds = new Set();
-    if (g.groupAdmin?._id && !g.groupAdmin.isDeleted) allUniqueUserIds.add(g.groupAdmin._id.toString());
-    (g.superAdmins || []).forEach((a) => { if (a._id && !a.isDeleted) allUniqueUserIds.add(a._id.toString()); });
-    (g.members || []).forEach((m) => { if (m._id && !m.isDeleted) allUniqueUserIds.add(m._id.toString()); });
+    console.log('=== DATABASE STRUCTURE DEBUG ===');
+    groups.forEach((group, index) => {
+      console.log(`Group ${index + 1}: ${group._id}`);
+      console.log('  All fields:', Object.keys(group.toObject ? group.toObject() : group));
+      console.log('  senderId in DB:', group.senderId);
+      console.log('  groupAdmin in DB:', group.groupAdmin);
+      console.log('  raw document:', JSON.stringify(group, null, 2).substring(0, 500)); // First 500 chars
+    });
+    console.log('=== END STRUCTURE DEBUG ===');
 
-    const membersCount = allUniqueUserIds.size;
-    const obj = g.toObject();
+    // ✅ Remove deleted users from groups automatically and filter out groups with deleted admins
+    const validGroups = groups.filter(group =>
+      !(group.groupAdmin && group.groupAdmin.isDeleted === true)
+    );
 
-    // ✅ Use the pre-fetched currentUser data (no await needed here)
-    if (currentUser) {
-      obj.senderId = {
-        _id: currentUser._id,
-        firstname: currentUser.firstname,
-        lastname: currentUser.lastname,
-        email: currentUser.email,
-        profileimg: currentUser.profileimg,
-        isDeleted: currentUser.isDeleted || false
-      };
-      console.log(`  ✅ Using current user as senderId: ${currentUser.firstname} ${currentUser.lastname}`);
-    } else {
-      // Fallback if current user not found
-      obj.senderId = fallbackUser;
-      console.log(`  ⚠️ Using current user ID as senderId: ${userId}`);
-    }
+    for (const group of groups) {
+      // ✅ If groupAdmin is deleted, the group should have been deleted automatically
+      // This check is just a safety net - if we find a deleted admin, skip this group
+      if (group.groupAdmin && group.groupAdmin.isDeleted === true) {
+        console.warn(`⚠️ Found group ${group._id} with deleted admin - should have been deleted. Skipping.`);
+        continue; // Skip this group
+      }
 
-    // ✅ Always set receiverId to null for group chats
-    obj.receiverId = null;
+      // Filter deleted users from members
+      if (group.members && Array.isArray(group.members)) {
+        const deletedMemberIds = [];
+        group.members = group.members.filter(member => {
+          if (member && member.isDeleted === true) {
+            deletedMemberIds.push(String(member._id));
+            return false;
+          }
+          return true;
+        });
 
-    console.log('  Final senderId:', obj.senderId);
-
-    if (type === "group") {
-      obj.partnerInfo = {
-        _id: String(g._id),
-        firstname: g.name || "Group",
-        lastname: "",
-        email: "",
-        profileimg: g.groupImage || "/uploads/group-default.png",
-        isGroup: true,
-        membersCount: membersCount
-      };
-    }
-
-    let unreadCount = 0;
-    const pendingMembers = [];
-
-    try {
-      const convo = convoMap.get(g._id.toString());
-      if (convo && Array.isArray(convo.messages)) {
-        const deletedForCurrentUser = new Set();
-        if (Array.isArray(convo.deletedForMe)) {
-          convo.deletedForMe.forEach((deletion) => {
-            if (
-              deletion?.userId &&
-              deletion?.messageId &&
-              String(deletion.userId) === String(userId)
-            ) {
-              deletedForCurrentUser.add(String(deletion.messageId));
-            }
+        // If deleted users were found, remove them from the group
+        if (deletedMemberIds.length > 0) {
+          const deletedObjectIds = deletedMemberIds.map(id =>
+            mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+          );
+          await ChatRequest.findByIdAndUpdate(group._id, {
+            $pull: { members: { $in: deletedObjectIds } }
+          });
+          // Also remove from superAdmins if they were there
+          await ChatRequest.findByIdAndUpdate(group._id, {
+            $pull: { superAdmins: { $in: deletedObjectIds } }
           });
         }
-
-        const allUserIds = Array.from(allUniqueUserIds);
-        const joinedAtByUser = convo.joinedAtByUser;
-
-        for (const uid of allUserIds) {
-          const lastReadAt = convo.lastReadAtByUser?.get?.(String(uid)) || convo.lastReadAtByUser?.[String(uid)];
-          const joinedAtEntry = joinedAtByUser
-            ? (typeof joinedAtByUser.get === "function"
-              ? joinedAtByUser.get(String(uid))
-              : joinedAtByUser[String(uid)])
-            : null;
-          const joinedAtDate = joinedAtEntry ? new Date(joinedAtEntry) : null;
-          let count = 0;
-
-          if (lastReadAt) {
-            const lastReadDate = new Date(lastReadAt);
-            count = convo.messages.reduce((acc, m) => {
-              if (!m) return acc;
-
-              const msgIdStr = String(m._id);
-              const msgDate = new Date(m.createdAt);
-
-              // Skip if message is deleted
-              if (m.isDeleteEvery === true) return acc;
-              if (deletedForCurrentUser.has(msgIdStr)) return acc;
-              if (joinedAtDate && msgDate < joinedAtDate) return acc;
-
-              // ✅ FIX: Only count if message is after last read time
-              return acc + (msgDate > lastReadDate ? 1 : 0);
-            }, 0);
-          } else {
-            // If no lastReadAt, count all visible messages as unread
-            count = convo.messages.reduce((acc, m) => {
-              if (!m) return acc;
-
-              const msgIdStr = String(m._id);
-              const msgDate = new Date(m.createdAt);
-
-              // Skip if message is deleted
-              if (m.isDeleteEvery === true) return acc;
-              if (deletedForCurrentUser.has(msgIdStr)) return acc;
-              if (joinedAtDate && msgDate < joinedAtDate) return acc;
-
-              return acc + 1;
-            }, 0);
-          }
-
-          if (String(uid) === String(userId)) unreadCount = count;
-          if (count > 0) pendingMembers.push({ userId: uid, count });
-        }
-
-        const { lastMessage, lastMessageTimestamp } = pickLastVisibleMessageForUser(convo);
-        obj.lastMessage = lastMessage;
-        obj.lastMessageTimestamp = lastMessageTimestamp || obj.updatedAt || obj.createdAt;
       }
-    } catch (err) {
-      console.error("Error computing unread count:", err);
+
+      // Filter deleted users from superAdmins
+      if (group.superAdmins && Array.isArray(group.superAdmins)) {
+        const deletedAdminIds = [];
+        group.superAdmins = group.superAdmins.filter(admin => {
+          if (admin && admin.isDeleted === true) {
+            deletedAdminIds.push(String(admin._id));
+            return false;
+          }
+          return true;
+        });
+
+        if (deletedAdminIds.length > 0) {
+          const deletedObjectIds = deletedAdminIds.map(id =>
+            mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
+          );
+          await ChatRequest.findByIdAndUpdate(group._id, {
+            $pull: { superAdmins: { $in: deletedObjectIds } }
+          });
+        }
+      }
+
+      validGroups.push(group);
     }
 
-    obj.unreadCount = unreadCount;
-    obj.pendingMembers = pendingMembers.map(pm => ({
-      userId: pm.userId,
-      count: pm.count,
-    }));
+    // Replace groups array with valid groups only
+    groups.length = 0;
+    groups.push(...validGroups);
 
-    return obj;
-  });
+    const groupIds = groups.map(g => g._id.toString());
+    const conversations = await ChatConversation.find({ chatRequestId: { $in: groupIds } })
+      .populate({ path: "messages.sender", select: "firstname lastname email profileimg" });
+    const convoMap = new Map(conversations.map(c => [c.chatRequestId.toString(), c]));
 
-  const pagination = {
-    currentPage: page,
-    totalPages: Math.ceil(totalGroups / limit),
-    totalItems: totalGroups,
-    itemsPerPage: limit,
-  };
+    // ✅ Get current user data BEFORE the map function
+    const currentUser = await User.findById(userId).select("firstname lastname email profileimg isDeleted");
 
-  const responseData = { message: "Groups", data, pagination };
-  try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
+    // ✅ Create a fallback user object in case currentUser is null
+    const fallbackUser = {
+      _id: userId,
+      firstname: "Current",
+      lastname: "User",
+      email: "",
+      profileimg: "/uploads/default.png",
+      isDeleted: false
+    };
 
-  // ✅ EMIT SOCKET EVENT FOR GROUP LIST UPDATE
-  try {
-    const io = getIO();
-    io.to(`user:${userId}`).emit("chatList:update", {
-      type: "group",
-      action: "listFetched",
-      data: data,
-      pagination: pagination
+    const data = groups.map(g => {
+      const creatorIdStr = g.groupAdmin?._id?.toString();
+      const adminIdSet = new Set((g.superAdmins || []).map(a => a._id.toString()));
+      const filteredMembers = (g.members || []).filter(m => {
+        if (!m) return false;
+        // Filter out deleted users
+        if (m.isDeleted === true) return false;
+        const mid = m._id.toString();
+        return mid !== creatorIdStr && !adminIdSet.has(mid);
+      });
+
+      const allUniqueUserIds = new Set();
+      if (g.groupAdmin?._id && !g.groupAdmin.isDeleted) allUniqueUserIds.add(g.groupAdmin._id.toString());
+      (g.superAdmins || []).forEach((a) => { if (a._id && !a.isDeleted) allUniqueUserIds.add(a._id.toString()); });
+      (g.members || []).forEach((m) => { if (m._id && !m.isDeleted) allUniqueUserIds.add(m._id.toString()); });
+
+      const membersCount = allUniqueUserIds.size;
+      const obj = g.toObject();
+
+      // ✅ ADD: Include groupName field in the response
+      obj.groupName = g.name || "Group";
+
+      // ✅ Use the pre-fetched currentUser data (no await needed here)
+      if (currentUser) {
+        obj.senderId = {
+          _id: currentUser._id,
+          firstname: currentUser.firstname,
+          lastname: currentUser.lastname,
+          email: currentUser.email,
+          profileimg: currentUser.profileimg,
+          isDeleted: currentUser.isDeleted || false
+        };
+        console.log(`  ✅ Using current user as senderId: ${currentUser.firstname} ${currentUser.lastname}`);
+      } else {
+        // Fallback if current user not found
+        obj.senderId = fallbackUser;
+        console.log(`  ⚠️ Using current user ID as senderId: ${userId}`);
+      }
+
+      // ✅ Always set receiverId to null for group chats
+      obj.receiverId = null;
+
+      console.log('  Final senderId:', obj.senderId);
+
+      if (type === "group") {
+        obj.partnerInfo = {
+          _id: String(g._id),
+          firstname: g.name || "Group",
+          lastname: "",
+          email: "",
+          profileimg: g.groupImage || "/uploads/group-default.png",
+          isGroup: true,
+          membersCount: membersCount,
+        };
+      }
+
+      let unreadCount = 0;
+      const pendingMembers = [];
+
+      try {
+        const convo = convoMap.get(g._id.toString());
+        if (convo && Array.isArray(convo.messages)) {
+          const deletedForCurrentUser = new Set();
+          if (Array.isArray(convo.deletedForMe)) {
+            convo.deletedForMe.forEach((deletion) => {
+              if (
+                deletion?.userId &&
+                deletion?.messageId &&
+                String(deletion.userId) === String(userId)
+              ) {
+                deletedForCurrentUser.add(String(deletion.messageId));
+              }
+            });
+          }
+
+          const allUserIds = Array.from(allUniqueUserIds);
+          const joinedAtByUser = convo.joinedAtByUser;
+
+          for (const uid of allUserIds) {
+            const lastReadAt = convo.lastReadAtByUser?.get?.(String(uid)) || convo.lastReadAtByUser?.[String(uid)];
+            const joinedAtEntry = joinedAtByUser
+              ? (typeof joinedAtByUser.get === "function"
+                ? joinedAtByUser.get(String(uid))
+                : joinedAtByUser[String(uid)])
+              : null;
+            const joinedAtDate = joinedAtEntry ? new Date(joinedAtEntry) : null;
+            let count = 0;
+
+            if (lastReadAt) {
+              const lastReadDate = new Date(lastReadAt);
+              count = convo.messages.reduce((acc, m) => {
+                if (!m) return acc;
+
+                const msgIdStr = String(m._id);
+                const msgDate = new Date(m.createdAt);
+
+                // Skip if message is deleted
+                if (m.isDeleteEvery === true) return acc;
+                if (deletedForCurrentUser.has(msgIdStr)) return acc;
+                if (joinedAtDate && msgDate < joinedAtDate) return acc;
+
+                // ✅ FIX: Only count if message is after last read time
+                return acc + (msgDate > lastReadDate ? 1 : 0);
+              }, 0);
+            } else {
+              // If no lastReadAt, count all visible messages as unread
+              count = convo.messages.reduce((acc, m) => {
+                if (!m) return acc;
+
+                const msgIdStr = String(m._id);
+                const msgDate = new Date(m.createdAt);
+
+                // Skip if message is deleted
+                if (m.isDeleteEvery === true) return acc;
+                if (deletedForCurrentUser.has(msgIdStr)) return acc;
+                if (joinedAtDate && msgDate < joinedAtDate) return acc;
+
+                return acc + 1;
+              }, 0);
+            }
+
+            if (String(uid) === String(userId)) unreadCount = count;
+            if (count > 0) pendingMembers.push({ userId: uid, count });
+          }
+
+          const { lastMessage, lastMessageTimestamp } = pickLastVisibleMessageForUser(convo);
+
+          // ✅ FIX: Only set lastMessage and lastMessageTimestamp if there's actually a message
+          if (lastMessage) {
+            obj.lastMessage = lastMessage;
+            obj.lastMessageTimestamp = lastMessageTimestamp;
+          } else {
+            obj.lastMessage = null;
+            obj.lastMessageTimestamp = null; // ✅ Set to null when no messages
+          }
+        } else {
+          // ✅ FIX: If no conversation or messages, set both to null
+          obj.lastMessage = null;
+          obj.lastMessageTimestamp = null;
+        }
+      } catch (err) {
+        console.error("Error computing unread count:", err);
+        // ✅ FIX: Set to null on error as well
+        obj.lastMessage = null;
+        obj.lastMessageTimestamp = null;
+      }
+
+      obj.unreadCount = unreadCount;
+      obj.pendingMembers = pendingMembers.map(pm => ({
+        userId: pm.userId,
+        count: pm.count,
+      }));
+
+      return obj;
     });
-    console.log(`📡 Group list socket event emitted to user ${userId}`);
-  } catch (err) {
-    console.error("Socket emit error (group list):", err.message);
-  }
 
-  return successResponse(res, "Groups", data, pagination, 200, 1);
-}
+    const pagination = {
+      currentPage: page,
+      totalPages: Math.ceil(totalGroups / limit),
+      totalItems: totalGroups,
+      itemsPerPage: limit,
+    };
+
+    const responseData = { message: "Groups", data, pagination };
+    try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
+
+    // ✅ EMIT SOCKET EVENT FOR GROUP LIST UPDATE
+    try {
+      const io = getIO();
+      io.to(`user:${userId}`).emit("chatList:update", {
+        type: "group",
+        action: "listFetched",
+        data: data,
+        pagination: pagination
+      });
+      console.log(`📡 Group list socket event emitted to user ${userId}`);
+    } catch (err) {
+      console.error("Socket emit error (group list):", err.message);
+    }
+
+    return successResponse(res, "Groups", data, pagination, 200, 1);
+  }
 
   // ========== INDIVIDUAL CHAT HANDLING (ENHANCED WITH AUTO-REORDERING) ==========
   let filter = {};

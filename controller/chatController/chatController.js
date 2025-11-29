@@ -772,26 +772,40 @@ export const getUsersForCreateGroup = asyncHandler(async (req, res) => {
     return errorResponse(res, "User not authenticated", 401);
   }
 
-  // Build search query - exclude current user and deleted users
+  // ✅ Build search query - exclude current user, deleted users, and only include subscribed users or admins
   let searchQuery = { 
     _id: { $ne: userId }, // Exclude current user
-    isDeleted: { $ne: true } // Exclude deleted users
+    isDeleted: { $ne: true }, // Exclude deleted users
+    $or: [
+      { isSubscription: true }, // Include subscribed users
+      { isAdmin: true } // Include admins
+    ]
   };
 
   if (search) {
     const searchRegex = new RegExp(search, 'i');
-    searchQuery.$or = [
-      { firstname: searchRegex },
-      { lastname: searchRegex },
-      { email: searchRegex },
-      { 
-        $expr: {
-          $regexMatch: {
-            input: { $concat: ["$firstname", " ", "$lastname"] },
-            regex: search,
-            options: "i"
+    searchQuery.$and = [
+      {
+        $or: [
+          { isSubscription: true },
+          { isAdmin: true }
+        ]
+      },
+      {
+        $or: [
+          { firstname: searchRegex },
+          { lastname: searchRegex },
+          { email: searchRegex },
+          { 
+            $expr: {
+              $regexMatch: {
+                input: { $concat: ["$firstname", " ", "$lastname"] },
+                regex: search,
+                options: "i"
+              }
+            }
           }
-        }
+        ]
       }
     ];
   }
@@ -800,9 +814,9 @@ export const getUsersForCreateGroup = asyncHandler(async (req, res) => {
     // Get total count for pagination
     const totalUsers = await User.countDocuments(searchQuery);
 
-    // Get users with pagination
+    // Get users with pagination - only subscribed users or admins
     const users = await User.find(searchQuery)
-      .select('firstname lastname email profileimg')
+      .select('firstname lastname email profileimg isSubscription isAdmin')
       .sort({ firstname: 1, lastname: 1 })
       .skip(skip)
       .limit(limit)
@@ -815,7 +829,9 @@ export const getUsersForCreateGroup = asyncHandler(async (req, res) => {
       lastname: user.lastname || "",
       email: user.email,
       profileimg: user.profileimg || "/uploads/default.png",
-      fullName: `${user.firstname || ""} ${user.lastname || ""}`.trim()
+      fullName: `${user.firstname || ""} ${user.lastname || ""}`.trim(),
+      isSubscription: user.isSubscription || false,
+      isAdmin: user.isAdmin || false
     }));
 
     const pagination = {
