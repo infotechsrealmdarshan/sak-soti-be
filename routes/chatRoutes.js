@@ -229,7 +229,7 @@ router.get("/:chatId", auth, subscriptionRequired, getChatMessages);
 
 /**
  * @swagger
- * /api/chat/{chatId}/messages:
+ * /api/chat/messages/{chatId}:
  *   delete:
  *     tags: [Chat]
  *     summary: Bulk delete messages with smart permission handling
@@ -277,7 +277,7 @@ router.get("/:chatId", auth, subscriptionRequired, getChatMessages);
  *       403:
  *         description: Permission denied (trying to delete others' messages for everyone)
  */
-router.delete("/:chatId/messages", auth, subscriptionRequired, deleteChatMessagesBulk);
+router.delete("/messages/:chatId", auth, subscriptionRequired, deleteChatMessagesBulk);
 
 // removed eligible-users endpoint
 /**
@@ -473,12 +473,12 @@ router.delete("/group/:id", auth, subscriptionRequired, deleteGroupByCreator);
  *         description: API logic issue - token missing or invalid / Group not found
  */
 router.put(
-  "/group/profile",
-  auth,
-  subscriptionRequired,
-  uploadMedia(["image"], 0, {}).single("image"),
-  updateGroupProfileByCreator,
-  uploadLimitErrorHandler
+	"/group/profile",
+	auth,
+	subscriptionRequired,
+	uploadMedia(["image"], 0, {}).single("image"),
+	updateGroupProfileByCreator,
+	uploadLimitErrorHandler
 );
 
 /**

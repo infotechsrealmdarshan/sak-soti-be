@@ -63,11 +63,14 @@ export const registerUser = asyncHandler(async (req, res) => {
     console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
 
+  // Count user's posts
+  const postCount = await Post.countDocuments({ author: user._id, isDeleted: { $ne: true } });
+
   // Exclude password from response
   const userResponse = user.toObject();
   delete userResponse.password;
 
-  return successResponse(res, "Registration successful", { accessToken, user: userResponse }, null, 200, 1);
+  return successResponse(res, "Registration successful", { accessToken, user: userResponse, postCount }, null, 200, 1);
 });
 
 
@@ -120,9 +123,21 @@ export const loginUser = asyncHandler(async (req, res) => {
 
   // Update push token if provided
   try {
-    if (fcmToken && fcmToken !== user.fcmToken) {
-      user.fcmToken = fcmToken;
-      await user.save();
+    if (fcmToken) {
+      // ✅ Check if this token is already used by ANOTHER user
+      const tokenConflictUser = await User.findOne({ fcmToken: fcmToken, _id: { $ne: user._id } });
+
+      if (tokenConflictUser) {
+        console.log(`🔄 FCM token conflict detected. Removing token from user ${tokenConflictUser._id}`);
+        tokenConflictUser.fcmToken = null;
+        await tokenConflictUser.save();
+      }
+
+      // ✅ Update current user's token if it's different
+      if (user.fcmToken !== fcmToken) {
+        user.fcmToken = fcmToken;
+        await user.save();
+      }
     }
   } catch (saveErr) {
     console.warn("⚠️ Failed to update fcmToken:", saveErr.message);
@@ -139,6 +154,9 @@ export const loginUser = asyncHandler(async (req, res) => {
     console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
 
+  // Count user's posts
+  const postCount = await Post.countDocuments({ author: user._id, isDeleted: { $ne: true } });
+
   // Exclude password from response
   const userResponse = user.toObject();
   delete userResponse.password;
@@ -146,7 +164,8 @@ export const loginUser = asyncHandler(async (req, res) => {
   // Success - return 200 with status 1 (user found and login successful)
   return successResponse(res, "Login successful", {
     accessToken,
-    user: userResponse
+    user: userResponse,
+    postCount
   }, null, 200, 1);
 });
 
@@ -170,6 +189,9 @@ export const getProfile = asyncHandler(async (req, res) => {
   delete userResponse.password;
   delete userResponse.firebaseToken;
 
+  // Count user's posts
+  const postCount = await Post.countDocuments({ author: userId, isDeleted: { $ne: true } });
+
   // Update cache
   try {
     await redisClient.setEx(`user:${userId}`, 3600, JSON.stringify(userResponse));
@@ -183,7 +205,7 @@ export const getProfile = asyncHandler(async (req, res) => {
   return successResponse(
     res,
     expired ? "Subscription expired, updated profile" : "Profile retrieved",
-    { user: userResponse }
+    { user: userResponse, postCount }
   );
 });
 

@@ -7,9 +7,17 @@ import { successResponse } from "../utils/response.js";
 
 export const getAdminAnalytics = asyncHandler(async (req, res) => {
   const now = new Date();
-  
+
   // Time ranges for graphs
   const startOfYear = new Date(now.getFullYear(), 0, 1);
+
+  // Time ranges for counts
+  const startOfDay = new Date(now);
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const startOfWeek = new Date(now);
+  startOfWeek.setDate(now.getDate() - 7);
+  startOfWeek.setHours(0, 0, 0, 0);
 
   // Execute all queries in parallel
   const [
@@ -17,6 +25,8 @@ export const getAdminAnalytics = asyncHandler(async (req, res) => {
     totalDeletedUsers,
     totalActiveUsers,
     totalInactiveUsers,
+    todayUsers,
+    weekUsers,
     totalSubscribedUsers,
     totalSubscriptionActiveUsers,
     totalSubscriptionInactiveUsers,
@@ -28,99 +38,105 @@ export const getAdminAnalytics = asyncHandler(async (req, res) => {
   ] = await Promise.all([
     // 1. Total users (all users regardless of status and deletion)
     User.countDocuments(),
-    
+
     // 2. Total Deleted users (isDeleted: true) - ONLY DELETED USERS
     User.countDocuments({ isDeleted: true }),
-    
+
     // 3. Total Active users (isDeleted: false AND status: "active")
     User.countDocuments({ isDeleted: false, status: "active" }),
-    
+
     // 4. Total Inactive users (isDeleted: false AND status: "inactive")
     User.countDocuments({ isDeleted: false, status: "inactive" }),
-    
-    // 5. Total Subscribed users (users with isSubscription: true AND not deleted)
+
+    // 5. Today Users (Created since start of today)
+    User.countDocuments({ createdAt: { $gte: startOfDay } }),
+
+    // 6. Week Users (Created in last 7 days)
+    User.countDocuments({ createdAt: { $gte: startOfWeek } }),
+
+    // 7. Total Subscribed users (users with isSubscription: true AND not deleted)
     User.countDocuments({ isSubscription: true, isDeleted: false }),
-    
-    // 6. Total Subscription Active users (active subscription status)
+
+    // 8. Total Subscription Active users (active subscription status)
     Subscription.countDocuments({ status: "active" }),
-    
-    // 7. Total Subscription Inactive users (incomplete, pending, in_progress, etc.)
-    Subscription.countDocuments({ 
-      status: { 
-        $in: ["incomplete", "in_progress", "past_due", "unpaid", "trialing"] 
-      } 
+
+    // 9. Total Subscription Inactive users (incomplete, pending, in_progress, etc.)
+    Subscription.countDocuments({
+      status: {
+        $in: ["incomplete", "in_progress", "past_due", "unpaid", "trialing"]
+      }
     }),
-    
-    // 8. Total Posts (only NON-DELETED posts - isDeleted: false)
+
+    // 10. Total Posts (only NON-DELETED posts - isDeleted: false)
     Post.countDocuments({ isDeleted: false }),
-    
-    // 9. Total News (all news, assuming news doesn't have isDeleted field)
+
+    // 11. Total News (all news, assuming news doesn't have isDeleted field)
     News.countDocuments(),
-    
+
     // Monthly total users graph data (ALL users including deleted for accurate growth tracking)
     User.aggregate([
-      { 
-        $match: { 
+      {
+        $match: {
           createdAt: { $gte: startOfYear }
-        } 
+        }
       },
-      { 
-        $group: { 
-          _id: { 
-            year: { $year: "$createdAt" }, 
-            month: { $month: "$createdAt" } 
-          }, 
-          count: { $sum: 1 } 
-        } 
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" }
+          },
+          count: { $sum: 1 }
+        }
       },
-      { 
-        $sort: { "_id.year": 1, "_id.month": 1 } 
+      {
+        $sort: { "_id.year": 1, "_id.month": 1 }
       }
     ]),
-    
+
     // Monthly active users graph data
     User.aggregate([
-      { 
-        $match: { 
+      {
+        $match: {
           createdAt: { $gte: startOfYear },
           isDeleted: false,
           status: "active"
-        } 
+        }
       },
-      { 
-        $group: { 
-          _id: { 
-            year: { $year: "$createdAt" }, 
-            month: { $month: "$createdAt" } 
-          }, 
-          count: { $sum: 1 } 
-        } 
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" }
+          },
+          count: { $sum: 1 }
+        }
       },
-      { 
-        $sort: { "_id.year": 1, "_id.month": 1 } 
+      {
+        $sort: { "_id.year": 1, "_id.month": 1 }
       }
     ]),
-    
+
     // Monthly inactive users graph data
     User.aggregate([
-      { 
-        $match: { 
+      {
+        $match: {
           createdAt: { $gte: startOfYear },
           isDeleted: false,
           status: "inactive"
-        } 
+        }
       },
-      { 
-        $group: { 
-          _id: { 
-            year: { $year: "$createdAt" }, 
-            month: { $month: "$createdAt" } 
-          }, 
-          count: { $sum: 1 } 
-        } 
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" }
+          },
+          count: { $sum: 1 }
+        }
       },
-      { 
-        $sort: { "_id.year": 1, "_id.month": 1 } 
+      {
+        $sort: { "_id.year": 1, "_id.month": 1 }
       }
     ])
   ]);
@@ -128,7 +144,7 @@ export const getAdminAnalytics = asyncHandler(async (req, res) => {
   // Format monthly data for graphs
   const currentYear = now.getFullYear();
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  
+
   const formatMonthlyData = (data) => {
     return months.map((monthName, index) => {
       const monthNumber = index + 1;
@@ -149,7 +165,9 @@ export const getAdminAnalytics = asyncHandler(async (req, res) => {
       total: totalUsers,
       deleted: totalDeletedUsers,
       active: totalActiveUsers,
-      inactive: totalInactiveUsers
+      inactive: totalInactiveUsers,
+      today: todayUsers,
+      week: weekUsers
     },
     subscriptions: {
       totalSubscribedUsers: totalSubscribedUsers,

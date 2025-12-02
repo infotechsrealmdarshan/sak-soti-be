@@ -2,8 +2,8 @@ import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import mongoose from "mongoose";
-import ChatRequest from "../models/ChatRequest.js"; // Add this import
-import ChatConversation from "../models/ChatConversation.js"; // Add this import
+import ChatRequest from "../models/ChatRequest.js";
+import ChatConversation from "../models/ChatConversation.js";
 
 let io = null;
 const chatParticipantsCache = new Map();
@@ -315,23 +315,38 @@ export const initializeSocket = (server) => {
     });
 
     // NEW: Listen for mark as read events from frontend
-    socket.on("markMessagesAsRead", (data) => {
+    socket.on("markMessagesAsRead", async (data) => {
       const { chatId } = data;
-      if (chatId) {
-        // Notify other participants that this user read messages
-        socket.to(`chat:${chatId}`).emit("messagesRead", {
-          chatId: String(chatId),
-          userId: String(userId),
-          readAt: new Date()
-        });
-        console.log(`📖 User ${userId} marked messages as read in chat: ${chatId}`);
+      if (chatId && mongoose.Types.ObjectId.isValid(chatId)) {
+        try {
+          const readAt = new Date();
+
+          // Update the lastReadAt timestamp in the database
+          await ChatConversation.findOneAndUpdate(
+            { chatRequestId: chatId },
+            {
+              $set: {
+                [`lastReadAtByUser.${String(userId)}`]: readAt
+              }
+            },
+            { upsert: true }
+          );
+
+          // Notify other participants that this user read messages
+          socket.to(`chat:${chatId}`).emit("messagesRead", {
+            chatId: String(chatId),
+            userId: String(userId),
+            readAt: readAt
+          });
+
+          console.log(`📖 User ${userId} marked messages as read in chat: ${chatId}`);
+        } catch (error) {
+          console.error("❌ Error marking messages as read:", error.message);
+        }
       }
     });
 
     // ✅ TYPING INDICATOR: Listen for typing start events
-    // Add this to your backend socket.js in the connection handler
-
-    // ✅ Enhanced typing handlers with logging
     socket.on("typing:start", async (data) => {
       const { chatId } = data;
       console.log("⌨️ [BACKEND] TYPING START RECEIVED:", {
@@ -380,24 +395,12 @@ export const initializeSocket = (server) => {
 
         // Also emit to individual user rooms for participants
         const participants = await getChatParticipantIds(chatId);
-        console.log("👥 [BACKEND] Typing participants:", {
-          chatId: chatId,
-          allParticipants: participants,
-          currentUser: socket.userId,
-          otherParticipants: participants.filter(pid => pid !== String(socket.userId))
-        });
 
         participants
           .filter(pid => pid !== String(socket.userId))
           .forEach(pid => {
-            console.log("📨 [BACKEND] Sending typing to user room:", {
-              targetUser: pid,
-              room: `user:${pid}`
-            });
             io.to(`user:${pid}`).emit("userTyping", typingData);
           });
-
-        console.log("✅ [BACKEND] Typing start broadcast completed");
 
       } catch (error) {
         console.error("❌ [BACKEND] typing:start error:", error.message);
@@ -432,24 +435,13 @@ export const initializeSocket = (server) => {
       // Also emit to individual user rooms
       try {
         const participants = await getChatParticipantIds(chatId);
-        console.log("👥 [BACKEND] Typing stop participants:", {
-          chatId: chatId,
-          allParticipants: participants,
-          currentUser: socket.userId,
-          otherParticipants: participants.filter(pid => pid !== String(socket.userId))
-        });
 
         participants
           .filter(pid => pid !== String(socket.userId))
           .forEach(pid => {
-            console.log("📨 [BACKEND] Sending typing stop to user room:", {
-              targetUser: pid,
-              room: `user:${pid}`
-            });
             io.to(`user:${pid}`).emit("userTyping", typingData);
           });
 
-        console.log("✅ [BACKEND] Typing stop broadcast completed");
       } catch (error) {
         console.error("❌ [BACKEND] typing:stop broadcast error:", error.message);
       }
@@ -480,3 +472,5 @@ export const getIO = () => {
   }
   return io;
 };
+
+export { chatParticipantsCache };

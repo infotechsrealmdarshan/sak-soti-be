@@ -206,7 +206,7 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
   });
 
   if (existing)
-    return errorResponse(res, "A pending request already exists", 409);
+    return errorResponse(res, "A pending request already exists", 200, 0);
 
   const request = await ChatRequest.create({ senderId, receiverId, chatType });
 
@@ -885,29 +885,6 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit);
-
-    console.log('=== GROUP DATA DEBUG ===');
-    groups.forEach((group, index) => {
-      console.log(`Group ${index + 1}: ${group._id}`);
-      console.log('  Raw senderId:', group.senderId);
-      console.log('  Raw groupAdmin:', group.groupAdmin);
-      console.log('  senderId is ObjectId:', group.senderId instanceof mongoose.Types.ObjectId);
-      console.log('  groupAdmin is ObjectId:', group.groupAdmin instanceof mongoose.Types.ObjectId);
-      console.log('  senderId string:', String(group.senderId));
-      console.log('  groupAdmin string:', String(group.groupAdmin));
-    });
-    console.log('=== END DEBUG ===');
-
-    console.log('=== DATABASE STRUCTURE DEBUG ===');
-    groups.forEach((group, index) => {
-      console.log(`Group ${index + 1}: ${group._id}`);
-      console.log('  All fields:', Object.keys(group.toObject ? group.toObject() : group));
-      console.log('  senderId in DB:', group.senderId);
-      console.log('  groupAdmin in DB:', group.groupAdmin);
-      console.log('  raw document:', JSON.stringify(group, null, 2).substring(0, 500)); // First 500 chars
-    });
-    console.log('=== END STRUCTURE DEBUG ===');
-
     // ✅ Remove deleted users from groups automatically and filter out groups with deleted admins
     const validGroups = groups.filter(group =>
       !(group.groupAdmin && group.groupAdmin.isDeleted === true)
@@ -996,24 +973,62 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
     const data = groups.map(g => {
       const creatorIdStr = g.groupAdmin?._id?.toString();
       const adminIdSet = new Set((g.superAdmins || []).map(a => a._id.toString()));
-      const filteredMembers = (g.members || []).filter(m => {
+
+      // ✅ Combine members and creator for display (Creator + Members)
+      let membersToDisplay = [...(g.members || [])];
+      if (g.groupAdmin && !g.groupAdmin.isDeleted) {
+        // Ensure creator is not duplicated
+        if (!membersToDisplay.some(m => String(m._id) === creatorIdStr)) {
+          membersToDisplay.unshift(g.groupAdmin); // Add creator to the top
+        }
+      }
+
+      const filteredMembers = membersToDisplay.filter(m => {
         if (!m) return false;
         // Filter out deleted users
         if (m.isDeleted === true) return false;
         const mid = m._id.toString();
-        return mid !== creatorIdStr && !adminIdSet.has(mid);
+        // Exclude super admins, but ALLOW creator
+        return !adminIdSet.has(mid);
       });
 
-      const allUniqueUserIds = new Set();
-      if (g.groupAdmin?._id && !g.groupAdmin.isDeleted) allUniqueUserIds.add(g.groupAdmin._id.toString());
-      (g.superAdmins || []).forEach((a) => { if (a._id && !a.isDeleted) allUniqueUserIds.add(a._id.toString()); });
-      (g.members || []).forEach((m) => { if (m._id && !m.isDeleted) allUniqueUserIds.add(m._id.toString()); });
+      const enhancedMembers = filteredMembers.map(member => {
+        if (!member) return null;
 
-      const membersCount = allUniqueUserIds.size;
+        const memberIdStr = String(member._id);
+        let userType = 'member'; // default
+
+        if (memberIdStr === creatorIdStr) {
+          userType = 'creator';
+        } else if (adminIdSet.has(memberIdStr)) {
+          userType = 'superAdmin';
+        }
+
+        return {
+          _id: member._id,
+          firstname: member.firstname,
+          lastname: member.lastname,
+          email: member.email,
+          profileimg: member.profileimg,
+          isDeleted: member.isDeleted || false,
+          userType: userType // ✅ ADDED: This identifies the role
+        };
+      }).filter(m => m !== null);
+
+      // ✅ Count only displayed members (Creator + Members, excluding Super Admins)
+      const membersCount = enhancedMembers.length;
+
       const obj = g.toObject();
 
       // ✅ ADD: Include groupName field in the response
       obj.groupName = g.name || "Group";
+
+      obj.members = enhancedMembers;
+      obj.membersCount = membersCount; // Update count to reflect displayed members
+
+      // ✅ Remove admin fields as requested
+      delete obj.groupAdmin;
+      delete obj.superAdmins;
 
       // ✅ Use the pre-fetched currentUser data (no await needed here)
       if (currentUser) {
@@ -1032,22 +1047,13 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
         console.log(`  ⚠️ Using current user ID as senderId: ${userId}`);
       }
 
+
       // ✅ Always set receiverId to null for group chats
       obj.receiverId = null;
 
       console.log('  Final senderId:', obj.senderId);
 
-      if (type === "group") {
-        obj.partnerInfo = {
-          _id: String(g._id),
-          firstname: g.name || "Group",
-          lastname: "",
-          email: "",
-          profileimg: g.groupImage || "/uploads/group-default.png",
-          isGroup: true,
-          membersCount: membersCount,
-        };
-      }
+      // ✅ partnerInfo removed for groups - not needed
 
       let unreadCount = 0;
       const pendingMembers = [];
@@ -1068,7 +1074,15 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
             });
           }
 
-          const allUserIds = Array.from(allUniqueUserIds);
+          // ✅ Fix: Use enhancedMembers to get user IDs (excludes super admins as requested)
+          const allUserIds = enhancedMembers.map(m => String(m._id));
+
+          // If current user is a super admin (and thus hidden), we might want to add them here 
+          // just to calculate their unreadCount, but for now we follow the "hide super admin" rule strictly.
+          // If the current user needs to see their own unread count even if hidden, we'd need to add:
+          if (!allUserIds.includes(String(userId))) {
+            allUserIds.push(String(userId));
+          }
           const joinedAtByUser = convo.joinedAtByUser;
 
           for (const uid of allUserIds) {
@@ -1157,7 +1171,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
     };
 
     const responseData = { message: "Groups", data, pagination };
-    try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
+    try { await redisClient.setEx(cacheKey, 10, JSON.stringify(responseData)); } catch { }
 
     // ✅ EMIT SOCKET EVENT FOR GROUP LIST UPDATE
     try {

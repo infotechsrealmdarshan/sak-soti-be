@@ -6,12 +6,11 @@ import mongoose from "mongoose";
 import { asyncHandler } from "../../utils/errorHandler.js";
 import { successResponse, errorResponse } from "../../utils/response.js";
 import { getIO } from "../../config/socket.js";
-import { sendFirebaseNotification } from "../../utils/firebaseHelper.js";
+import { isValidFCMToken, sendFirebaseNotification } from "../../utils/firebaseHelper.js";
 import Notification from "../../models/Notification.js";
 import {
   createMessageResponse,
-  createDeletedForMeMap,
-  filterVisibleMessages
+  createDeletedForMeMap
 } from "../../utils/messageUtils.js";
 
 const deleteRedisKeysByPattern = async (pattern) => {
@@ -194,6 +193,7 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
       console.error("Socket emit error:", error.message);
     }
 
+    // ✅ UPDATED: Send Push Notifications with token validation
     try {
       const sender = await User.findById(userId).select("firstname lastname email");
       const receiverId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
@@ -211,7 +211,12 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
           deeplink: "",
         });
 
-        if (receiver.fcmToken) {
+        console.log(`📱 Text notification created for user: ${receiver.email}`);
+
+        // ✅ IMPROVED: Validate token before sending
+        if (receiver.fcmToken && isValidFCMToken(receiver.fcmToken)) {
+          console.log(`✅ Valid FCM token found for ${receiver.email}, sending notification...`);
+
           const pushResult = await sendFirebaseNotification(
             receiver.fcmToken,
             title,
@@ -222,13 +227,26 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
           notification.firebaseStatus = pushResult.success ? "sent" : "failed";
           await notification.save();
 
-          if (pushResult.error?.includes("invalid-registration-token")) {
-            await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
+          if (pushResult.success) {
+            console.log(`✅ Firebase notification sent successfully to ${receiver.email}`);
+          } else {
+            console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
+
+            // Auto-clean invalid tokens
+            if (pushResult.error?.includes("invalid-registration-token") ||
+              pushResult.error?.includes("not-registered")) {
+              console.log(`🔄 Removing invalid FCM token for user ${receiver.email}`);
+              await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
+            }
           }
+        } else {
+          console.warn(`⚠️ Invalid or missing FCM token for ${receiver.email}, skipping push notification`);
+          notification.firebaseStatus = "skipped_invalid_token";
+          await notification.save();
         }
       }
     } catch (err) {
-      console.error("Error sending chat push notification:", err.message);
+      console.error("❌ Error sending chat notification:", err.message);
     }
 
     try {
@@ -304,6 +322,7 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
     console.error("Socket emit error:", error.message);
   }
 
+  // ✅ UPDATED: Group notification with token validation
   try {
     const sender = await User.findById(userId).select("firstname lastname email");
     const senderName = `${sender.firstname || ""} ${sender.lastname || ""}`.trim() || sender.email;
@@ -315,28 +334,53 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
       _id: { $in: uniqueParticipants.filter((id) => id !== String(userId)) },
     }).select("fcmToken email");
 
+    console.log(`📢 Sending group notifications to ${receivers.length} members`);
+
     for (const receiver of receivers) {
-      const notification = await Notification.create({
-        userId: receiver._id,
-        title,
-        message: body,
-        deeplink: "",
-      });
-
-      if (receiver.fcmToken) {
-        const pushResult = await sendFirebaseNotification(
-          receiver.fcmToken,
+      try {
+        const notification = await Notification.create({
+          userId: receiver._id,
           title,
-          body,
-          { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString() }
-        );
+          message: body,
+          deeplink: "",
+        });
 
-        notification.firebaseStatus = pushResult.success ? "sent" : "failed";
-        await notification.save();
+        // ✅ IMPROVED: Validate token before sending
+        if (receiver.fcmToken && isValidFCMToken(receiver.fcmToken)) {
+          console.log(`✅ Valid FCM token for ${receiver.email}, sending...`);
+
+          const pushResult = await sendFirebaseNotification(
+            receiver.fcmToken,
+            title,
+            body,
+            { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString() }
+          );
+
+          notification.firebaseStatus = pushResult.success ? "sent" : "failed";
+          await notification.save();
+
+          if (!pushResult.success) {
+            console.warn(`⚠️ Failed to send to ${receiver.email}: ${pushResult.error}`);
+
+            // Auto-clean invalid tokens
+            if (pushResult.error?.includes("invalid-registration-token") ||
+              pushResult.error?.includes("not-registered") ||
+              pushResult.error?.includes("Requested entity was not found")) {  // ✅ Add this condition
+              console.log(`🔄 Removing invalid FCM token for user ${receiver.email}`);
+              await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
+            }
+          }
+        } else {
+          console.warn(`⚠️ Invalid or missing FCM token for ${receiver.email}, skipping`);
+          notification.firebaseStatus = "skipped_invalid_token";
+          await notification.save();
+        }
+      } catch (err) {
+        console.error(`❌ Error sending notification to ${receiver.email}:`, err.message);
       }
     }
   } catch (err) {
-    console.error("Error sending group notification:", err.message);
+    console.error("❌ Error sending group notification:", err.message);
   }
 
   try {
@@ -375,16 +419,21 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
   }
 
   let isPartnerDeleted = false;
+  let partnerId = null;
+  let isGroup = false;
+  let groupRoot = null;
+
   if (reqDoc.chatType === 'individual') {
     if (reqDoc.status !== 'accepted') return successResponse(res, "Chat request not accepted yet", null, null, 200, 0);
     const participants = [reqDoc.senderId.toString(), reqDoc.receiverId.toString()];
     if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
-    const partnerId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
+    partnerId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
     const partner = await User.findById(partnerId).select("isDeleted");
     isPartnerDeleted = partner && partner.isDeleted === true;
   } else {
-    const groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({ _id: reqDoc.groupId, chatType: 'group', receiverId: null });
+    isGroup = true;
+    groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({ _id: reqDoc.groupId, chatType: 'group', receiverId: null });
     if (!groupRoot) return successResponse(res, "Group id not found", null, null, 200, 0);
     const isParticipant = String(groupRoot.groupAdmin) === String(userId)
       || (groupRoot.superAdmins || []).map(String).includes(String(userId))
@@ -503,6 +552,120 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
     }
   } catch (error) {
     console.error("Socket emit error:", error.message);
+  }
+
+  // ✅ ADDED: Send Push Notifications
+  try {
+    const sender = await User.findById(userId).select("firstname lastname email");
+    const senderName = `${sender.firstname || ""} ${sender.lastname || ""}`.trim() || sender.email;
+
+    if (reqDoc.chatType === "individual") {
+      // Individual chat notification
+      const receiverId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
+      const receiver = await User.findById(receiverId).select("firstname lastname email fcmToken");
+
+      if (receiver) {
+        let messageBody = "";
+        if (messageType === 'image') {
+          messageBody = `${senderName} sent an image`;
+        } else if (messageType === 'video') {
+          messageBody = `${senderName} sent a video`;
+        } else if (messageType === 'audio') {
+          messageBody = `${senderName} sent an audio message`;
+        } else if (messageType === 'pdf') {
+          messageBody = `${senderName} sent a document`;
+        } else {
+          messageBody = `${senderName} sent a file`;
+        }
+
+        const title = "New Media Message";
+        const body = messageBody;
+
+        const notification = await Notification.create({
+          userId: receiver._id,
+          title,
+          message: body,
+          deeplink: "",
+        });
+
+        console.log("Receiver info for media notification:", notification);
+
+        if (receiver.fcmToken) {
+          const pushResult = await sendFirebaseNotification(
+            receiver.fcmToken,
+            title,
+            body,
+            { type: "chat_message", senderId: userId.toString(), deeplink: "" }
+          );
+
+          notification.firebaseStatus = pushResult.success ? "sent" : "failed";
+          await notification.save();
+
+          if (pushResult.error?.includes("invalid-registration-token")) {
+            await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
+          }
+        }
+      }
+    } else if (reqDoc.chatType === "group") {
+      // Group chat notification
+      const groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({
+        _id: reqDoc.groupId,
+        chatType: "group",
+        receiverId: null,
+      }).select("members superAdmins groupAdmin");
+
+      if (groupRoot) {
+        const allGroupMemberIds = [
+          String(groupRoot.groupAdmin),
+          ...(groupRoot.superAdmins || []).map(String),
+          ...(groupRoot.members || []).map(String)
+        ].filter(id => id !== String(userId));
+
+        let messageBody = "";
+        if (messageType === 'image') {
+          messageBody = `${senderName} sent an image in ${groupRoot.name || "Group"}`;
+        } else if (messageType === 'video') {
+          messageBody = `${senderName} sent a video in ${groupRoot.name || "Group"}`;
+        } else if (messageType === 'audio') {
+          messageBody = `${senderName} sent an audio message in ${groupRoot.name || "Group"}`;
+        } else if (messageType === 'pdf') {
+          messageBody = `${senderName} sent a document in ${groupRoot.name || "Group"}`;
+        } else {
+          messageBody = `${senderName} sent a file in ${groupRoot.name || "Group"}`;
+        }
+
+        const title = "New Group Media";
+        const body = messageBody;
+
+        // Get all receivers except sender
+        const receivers = await User.find({
+          _id: { $in: allGroupMemberIds },
+        }).select("fcmToken email");
+
+        for (const receiver of receivers) {
+          const notification = await Notification.create({
+            userId: receiver._id,
+            title,
+            message: body,
+            deeplink: "",
+          });
+
+          if (receiver.fcmToken) {
+            const pushResult = await sendFirebaseNotification(
+              receiver.fcmToken,
+              title,
+              body,
+              { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString() }
+            );
+
+            notification.firebaseStatus = pushResult.success ? "sent" : "failed";
+            await notification.save();
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error sending media notification:", err.message);
   }
 
   try {
@@ -773,7 +936,7 @@ export const getUsersForCreateGroup = asyncHandler(async (req, res) => {
   }
 
   // ✅ Build search query - exclude current user, deleted users, and only include subscribed users or admins
-  let searchQuery = { 
+  let searchQuery = {
     _id: { $ne: userId }, // Exclude current user
     isDeleted: { $ne: true }, // Exclude deleted users
     $or: [
@@ -796,7 +959,7 @@ export const getUsersForCreateGroup = asyncHandler(async (req, res) => {
           { firstname: searchRegex },
           { lastname: searchRegex },
           { email: searchRegex },
-          { 
+          {
             $expr: {
               $regexMatch: {
                 input: { $concat: ["$firstname", " ", "$lastname"] },
