@@ -9,8 +9,6 @@ import { sendFirebaseNotification } from "../../utils/firebaseHelper.js";
 import mongoose from "mongoose";
 import redisClient from "../../config/redis.js";
 import ChatConversation from "../../models/ChatConversation.js";
-import { checkUserDeleted } from "../../utils/chatHelper.js";
-// ... other imports
 
 // Helper function to delete Redis keys by pattern
 const deleteRedisKeysByPattern = async (pattern) => {
@@ -258,11 +256,14 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
 
     // 2️⃣ Send Firebase push
     if (receiver.fcmToken) {
+      const payload = { type: "chat_request", senderId: senderId.toString(), deeplink: "", chatId: populated._id.toString() };
+      console.log("🔔 Sending chat_request Notification Payload:", JSON.stringify(payload, null, 2));
+
       const pushResult = await sendFirebaseNotification(
         receiver.fcmToken,
         title,
         message,
-        { type: "chat_request", senderId: senderId.toString(), deeplink: "" }
+        payload
       );
 
       notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -414,11 +415,14 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
       console.log(`🔔 Notification created for reject ${sender._id}: ${notification}`);
 
       if (sender.fcmToken) {
+        const payload = { type: "chat_request_reject", senderId: receiver._id.toString(), deeplink: "", chatId: id.toString() };
+        console.log("🔔 Sending chat_request_reject Notification Payload:", JSON.stringify(payload, null, 2));
+
         const pushResult = await sendFirebaseNotification(
           sender.fcmToken,
           title,
           message,
-          { type: "chat_request_reject", senderId: receiver._id.toString(), deeplink: "" }
+          payload
         );
 
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -498,11 +502,14 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
           if (groupAdmin?.fcmToken) {
             const title = "New Member Joined";
             const message = `${receiverName} has joined your group “${groupRoot.name}”.`;
-            await sendFirebaseNotification(groupAdmin.fcmToken, title, message, {
+            const payload = {
               type: "group_member_join",
               groupId: String(groupRoot._id),
               memberId: String(receiver._id),
-            });
+              chatId: String(groupRoot._id)
+            };
+            console.log("🔔 Sending group_member_join Notification Payload:", JSON.stringify(payload, null, 2));
+            await sendFirebaseNotification(groupAdmin.fcmToken, title, message, payload);
           }
         } catch (err) {
           console.warn("Notification error (group admin):", err.message);
@@ -642,7 +649,7 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
         sender.fcmToken,
         title,
         message,
-        { type: "chat_request_accept", senderId: receiver._id.toString(), deeplink: "" }
+        { type: "chat_request_accept", senderId: receiver._id.toString(), deeplink: "", chatId: request._id.toString() }
       );
 
       notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -1455,4 +1462,124 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
   return successResponse(res, `Requests (${type})`, paginatedRequests, pagination, 200, 1);
 });
 
-export default { sendChatRequest };
+export const getChatRequestDetails = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user?.id;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return errorResponse(res, "Invalid chat request ID", 400);
+  }
+
+  const request = await ChatRequest.findById(id)
+    .populate([
+      { path: "senderId", select: "firstname lastname email profileimg isDeleted" },
+      { path: "receiverId", select: "firstname lastname email profileimg isDeleted" },
+      { path: "groupAdmin", select: "firstname lastname email profileimg isDeleted" },
+      { path: "superAdmins", select: "firstname lastname email profileimg isDeleted" },
+      { path: "members", select: "firstname lastname email profileimg isDeleted" }
+    ]);
+
+  if (!request) {
+    return errorResponse(res, "Chat request not found", 404);
+  }
+
+  // Check if user is part of the chat
+  const isParticipant =
+    String(request.senderId?._id || request.senderId) === String(userId) ||
+    String(request.receiverId?._id || request.receiverId) === String(userId) ||
+    (request.chatType === 'group' && (
+      String(request.groupAdmin?._id || request.groupAdmin) === String(userId) ||
+      (request.superAdmins || []).some(a => String(a._id || a) === String(userId)) ||
+      (request.members || []).some(m => String(m._id || m) === String(userId))
+    ));
+
+  if (!isParticipant && !req.user.isAdmin) {
+    return errorResponse(res, "You are not authorized to view this chat", 403);
+  }
+
+  const cleaned = cleanChatRequest(request, userId, request.status === 'accepted' ? 'accepted' : 'pending');
+
+  // Fetch conversation details if accepted
+  if (request.status === "accepted") {
+    const conversation = await ChatConversation.findOne({ chatRequestId: request._id })
+      .select("messages lastReadAtByUser joinedAtByUser deletedForMe")
+      .populate({ path: "messages.sender", select: "_id" });
+
+    if (conversation) {
+      // Calculate unread count
+      let lastReadTime = new Date(0);
+      if (conversation.lastReadAtByUser) {
+        const userReadTime = typeof conversation.lastReadAtByUser.get === "function"
+          ? conversation.lastReadAtByUser.get(String(userId))
+          : conversation.lastReadAtByUser[String(userId)];
+        if (userReadTime) lastReadTime = new Date(userReadTime);
+      }
+
+      const unreadMsgs = (conversation.messages || []).filter(msg => {
+        const senderIdStr = msg.sender?._id ? String(msg.sender._id) : String(msg.sender);
+        if (senderIdStr === String(userId)) return false;
+        if (msg.isDeleteEvery) return false;
+        if (conversation.deletedForMe && conversation.deletedForMe.some(d =>
+          String(d.messageId) === String(msg._id) && String(d.userId) === String(userId)
+        )) return false;
+        return new Date(msg.createdAt) > lastReadTime;
+      });
+
+      cleaned.unreadCount = unreadMsgs.length;
+
+      // Get last message logic
+      const deletedForCurrentUser = new Set();
+      if (Array.isArray(conversation.deletedForMe)) {
+        conversation.deletedForMe.forEach((deletion) => {
+          if (
+            deletion?.userId &&
+            deletion?.messageId &&
+            String(deletion.userId) === String(userId)
+          ) {
+            deletedForCurrentUser.add(String(deletion.messageId));
+          }
+        });
+      }
+
+      let joinedAtDate = null;
+      if (conversation.joinedAtByUser) {
+        const joinedEntry = typeof conversation.joinedAtByUser.get === "function"
+          ? conversation.joinedAtByUser.get(String(userId))
+          : conversation.joinedAtByUser[String(userId)];
+        if (joinedEntry) {
+          joinedAtDate = new Date(joinedEntry);
+        }
+      }
+
+      let lastMessage = null;
+      let lastMessageTimestamp = null;
+
+      for (let idx = conversation.messages.length - 1; idx >= 0; idx -= 1) {
+        const msg = conversation.messages[idx];
+        if (!msg) continue;
+
+        const msgIdStr = String(msg._id);
+        if (msg.isDeleteEvery === true) continue;
+        if (deletedForCurrentUser.has(msgIdStr)) continue;
+        if (joinedAtDate && new Date(msg.createdAt) < joinedAtDate) continue;
+
+        lastMessage = msg.content || (msg.mediaUrl ? "Media" : "Message");
+        lastMessageTimestamp = msg.createdAt;
+        break;
+      }
+
+      cleaned.lastMessage = lastMessage;
+      cleaned.lastMessageTimestamp = lastMessageTimestamp;
+    } else {
+      cleaned.unreadCount = 0;
+      cleaned.lastMessage = null;
+      cleaned.lastMessageTimestamp = null;
+    }
+  } else {
+    cleaned.unreadCount = 0;
+    cleaned.lastMessage = null;
+    cleaned.lastMessageTimestamp = null;
+  }
+
+  return successResponse(res, "Chat details fetched", cleaned, null, 200, 1);
+});

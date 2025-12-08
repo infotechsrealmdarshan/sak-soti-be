@@ -358,7 +358,7 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
           member.fcmToken,
           titleAdded,
           body,
-          { type: "group_added", groupId: group._id.toString(), senderId: creatorId }
+          { type: "group_added", chatId: group._id.toString(), senderId: creatorId }
         );
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";
         await notification.save();
@@ -384,7 +384,7 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
           invitee.fcmToken,
           titleInvited,
           body,
-          { type: "group_invitation", groupId: group._id.toString(), senderId: creatorId }
+          { type: "group_invitation", chatId: group._id.toString(), senderId: creatorId }
         );
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";
         await notification.save();
@@ -770,7 +770,7 @@ export const updateGroupByCreator = asyncHandler(async (req, res) => {
           user.fcmToken,
           title,
           message,
-          { type: "group_add", groupId: group._id.toString(), senderId: creatorId }
+          { type: "group_add", chatId: group._id.toString(), senderId: creatorId }
         );
 
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -808,7 +808,7 @@ export const updateGroupByCreator = asyncHandler(async (req, res) => {
           user.fcmToken,
           title,
           message,
-          { type: "group_remove", groupId: group._id.toString(), senderId: creatorId }
+          { type: "group_remove", chatId: group._id.toString(), senderId: creatorId }
         );
 
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";

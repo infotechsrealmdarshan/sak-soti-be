@@ -209,6 +209,7 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
           title,
           message: body,
           deeplink: "",
+          chatId: chatId.toString()
         });
 
         console.log(`📱 Text notification created for user: ${receiver.email}`);
@@ -221,14 +222,14 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
             receiver.fcmToken,
             title,
             body,
-            { type: "chat_message", senderId: userId.toString(), deeplink: "" }
+            { type: "chat_message", senderId: userId.toString(), deeplink: "", chatId: chatId.toString() }
           );
 
           notification.firebaseStatus = pushResult.success ? "sent" : "failed";
           await notification.save();
-
+          console.log(`✅ Firebase notification sent successfully to ${notification}`);
           if (pushResult.success) {
-            console.log(`✅ Firebase notification sent successfully to ${receiver.email}`);
+            console.log(`✅ Firebase notification sent successfully to ${pushResult}`);
           } else {
             console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
 
@@ -343,6 +344,7 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
           title,
           message: body,
           deeplink: "",
+          chatId: chatId.toString(),
         });
 
         // ✅ IMPROVED: Validate token before sending
@@ -353,7 +355,7 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
             receiver.fcmToken,
             title,
             body,
-            { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString() }
+            { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString(), chatId: groupRoot._id.toString() }
           );
 
           notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -586,6 +588,7 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
           title,
           message: body,
           deeplink: "",
+            chatId: groupRoot._id.toString(),
         });
 
         console.log("Receiver info for media notification:", notification);
@@ -595,7 +598,7 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
             receiver.fcmToken,
             title,
             body,
-            { type: "chat_message", senderId: userId.toString(), deeplink: "" }
+            { type: "chat_message", senderId: userId.toString(), deeplink: "", chatId: chatId.toString() }
           );
 
           notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -655,7 +658,7 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
               receiver.fcmToken,
               title,
               body,
-              { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString() }
+              { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString(), chatId: groupRoot._id.toString() }
             );
 
             notification.firebaseStatus = pushResult.success ? "sent" : "failed";

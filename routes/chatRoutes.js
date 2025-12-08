@@ -2,7 +2,7 @@ import express from "express";
 import auth from "../middlewares/auth.js";
 import subscriptionRequired from "../middlewares/subscription.js";
 import { uploadMedia, uploadLimitErrorHandler } from "../middlewares/uploadMedia.js";
-import { actOnChatRequest, getRequestsByType, sendChatRequest } from "../controller/chatController/chatRequestController.js";
+import { actOnChatRequest, getRequestsByType, sendChatRequest, getChatRequestDetails } from "../controller/chatController/chatRequestController.js";
 import { createGroupViaJson, deleteGroupByCreator, updateGroupByCreator, updateGroupProfileByCreator } from "../controller/chatController/groupController.js";
 import { getChatMessages, getUsersForCreateGroup, sendChatMessage, uploadChatMedia } from "../controller/chatController/chatController.js";
 import { deleteChatMessagesBulk, editMessage } from "../controller/chatController/updateChatController.js";
@@ -115,6 +115,28 @@ router.get("/requests", auth, subscriptionRequired, getRequestsByType);
  *         description: API logic issue
  */
 router.put("/request/:id", auth, subscriptionRequired, actOnChatRequest);
+
+/**
+ * @swagger
+ * /api/chat/request/details/{id}:
+ *   get:
+ *     tags: [Chat]
+ *     summary: Get chat request details by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Chat details fetched
+ *       404:
+ *         description: Chat request not found
+ */
+router.get("/request/details/:id", auth, subscriptionRequired, getChatRequestDetails);
 
 /**
  * @swagger

@@ -1324,3 +1324,234 @@
 2025-11-30 13:10:46 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
 2025-11-30 13:12:57 +05:30: (node:14312) [MONGOOSE] Warning: Duplicate schema index on {"chatRequestId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
 2025-11-30 13:12:57 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
+2025-12-02 19:46:42 +05:30: (node:8244) [MONGOOSE] Warning: Duplicate schema index on {"chatRequestId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+2025-12-02 19:46:42 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
+2025-12-02 20:05:56 +05:30: (node:10736) [MONGOOSE] Warning: Duplicate schema index on {"chatRequestId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+2025-12-02 20:05:56 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
+2025-12-02 20:06:08 +05:30: (node:17264) [MONGOOSE] Warning: Duplicate schema index on {"chatRequestId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+2025-12-02 20:06:08 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
+2025-12-02 20:40:28 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 20:40:28 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 20:40:28 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 20:40:32 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 20:40:32 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 20:40:32 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 20:40:34 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 20:40:34 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 20:40:34 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 20:40:35 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 20:40:35 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 20:40:35 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 20:40:37 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 20:40:37 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 20:40:37 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 20:40:39 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 20:40:39 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 20:40:39 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 20:55:57 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 21:04:47 +05:30: ❌ FCM Error Details:
+2025-12-02 21:04:47 +05:30: Error message: Requested entity was not found.
+2025-12-02 21:04:47 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 21:04:47 +05:30: Error details: undefined
+2025-12-02 21:04:47 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 21:04:47 +05:30: ⚠️ Firebase send failed: Requested entity was not found.
+2025-12-02 21:48:02 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 22:03:05 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:05 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:05 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:06 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:06 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:06 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:08 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:08 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:08 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:09 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:09 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:09 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:10 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:10 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:10 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:12 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:12 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:12 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:13 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:13 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:13 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:14 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:14 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:14 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:03:28 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 22:03:36 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 22:03:55 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:03:55 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:03:55 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:04:14 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 22:04:24 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 22:04:35 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-02 22:04:35 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-02 22:04:35 +05:30: ❌ FCM Error Details:
+2025-12-02 22:04:35 +05:30: Error message: Requested entity was not found.
+2025-12-02 22:04:35 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 22:04:35 +05:30: Error details: undefined
+2025-12-02 22:04:35 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 22:04:35 +05:30: ⚠️ Failed to send to test1@gmail.com: Requested entity was not found.
+2025-12-02 22:04:35 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-02 22:05:30 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping push notification
+2025-12-02 22:19:13 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 22:20:30 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 23:10:48 +05:30: ⚠️ Invalid or missing FCM token for deep.p@yopmail.com, skipping push notification
+2025-12-02 23:13:16 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 23:13:16 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 23:13:16 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 23:13:16 +05:30: ❌ FCM Error Details:
+2025-12-02 23:13:16 +05:30: Error message: Requested entity was not found.
+2025-12-02 23:13:16 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 23:13:16 +05:30: Error details: undefined
+2025-12-02 23:13:16 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 23:13:17 +05:30: ❌ FCM Error Details:
+2025-12-02 23:13:17 +05:30: Error message: Requested entity was not found.
+2025-12-02 23:13:17 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 23:13:17 +05:30: Error details: undefined
+2025-12-02 23:13:17 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 23:13:17 +05:30: ❌ FCM Error Details:
+2025-12-02 23:13:17 +05:30: Error message: Requested entity was not found.
+2025-12-02 23:13:17 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 23:13:17 +05:30: Error details: undefined
+2025-12-02 23:13:17 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 23:13:17 +05:30: ❌ FCM Error Details:
+2025-12-02 23:13:17 +05:30: Error message: Requested entity was not found.
+2025-12-02 23:13:17 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 23:13:17 +05:30: Error details: undefined
+2025-12-02 23:13:17 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 23:13:17 +05:30: ❌ FCM Error Details:
+2025-12-02 23:13:17 +05:30: Error message: Requested entity was not found.
+2025-12-02 23:13:17 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 23:13:17 +05:30: Error details: undefined
+2025-12-02 23:13:17 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 23:13:18 +05:30: ❌ FCM Error Details:
+2025-12-02 23:13:18 +05:30: Error message: Requested entity was not found.
+2025-12-02 23:13:18 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-02 23:13:18 +05:30: Error details: undefined
+2025-12-02 23:13:18 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-02 23:13:18 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 23:13:18 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 23:13:18 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-02 23:13:18 +05:30: ⚠️ Skipping invalid FCM token: d9Hk...YourDeviceFcmToken
+2025-12-07 12:24:48 +05:30: (node:20152) [MONGOOSE] Warning: Duplicate schema index on {"chatRequestId":1} found. This is often due to declaring an index using both "index: true" and "schema.index()". Please remove the duplicate index definition.
+2025-12-07 12:24:48 +05:30: (Use `node --trace-warnings ...` to show where the warning was created)
+2025-12-07 15:41:17 +05:30: ❌ FCM Error Details:
+2025-12-07 15:41:17 +05:30: Error message: Requested entity was not found.
+2025-12-07 15:41:17 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-07 15:41:17 +05:30: Error details: undefined
+2025-12-07 15:41:17 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-07 15:41:17 +05:30: ⚠️ Firebase send failed: Requested entity was not found.
+2025-12-07 15:41:25 +05:30: ❌ FCM Error Details:
+2025-12-07 15:41:25 +05:30: Error message: Requested entity was not found.
+2025-12-07 15:41:25 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-07 15:41:25 +05:30: Error details: undefined
+2025-12-07 15:41:25 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-07 15:41:25 +05:30: ⚠️ Firebase send failed: Requested entity was not found.
+2025-12-07 15:41:36 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 15:41:36 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 15:41:36 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 15:41:36 +05:30: ❌ FCM Error Details:
+2025-12-07 15:41:36 +05:30: Error message: Requested entity was not found.
+2025-12-07 15:41:36 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-07 15:41:36 +05:30: Error details: undefined
+2025-12-07 15:41:36 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-07 15:41:36 +05:30: ⚠️ Failed to send to tirth.p@yopmail.com: Requested entity was not found.
+2025-12-07 15:41:44 +05:30: ⚠️ Invalid or missing FCM token for tirth.p@yopmail.com, skipping push notification
+2025-12-07 15:42:00 +05:30: ⚠️ Invalid or missing FCM token for tirth.p@yopmail.com, skipping push notification
+2025-12-07 15:46:05 +05:30: ❌ FCM Error Details:
+2025-12-07 15:46:05 +05:30: Error message: Requested entity was not found.
+2025-12-07 15:46:05 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-07 15:46:05 +05:30: Error details: undefined
+2025-12-07 15:46:05 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-07 15:46:05 +05:30: ⚠️ Firebase send failed: Requested entity was not found.
+2025-12-07 15:46:59 +05:30: ⚠️ Invalid or missing FCM token for tirth.p@yopmail.com, skipping push notification
+2025-12-07 15:47:22 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 15:47:22 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 15:47:22 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 15:47:22 +05:30: ❌ FCM Error Details:
+2025-12-07 15:47:22 +05:30: Error message: Requested entity was not found.
+2025-12-07 15:47:22 +05:30: Error code: messaging/registration-token-not-registered
+2025-12-07 15:47:22 +05:30: Error details: undefined
+2025-12-07 15:47:22 +05:30: 🔄 Token not registered - app may be uninstalled
+2025-12-07 15:47:22 +05:30: ⚠️ Failed to send to deep.p@yopmail.com: Requested entity was not found.
+2025-12-07 15:47:37 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 15:47:37 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 15:47:37 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 15:47:37 +05:30: ⚠️ Invalid or missing FCM token for deep.p@yopmail.com, skipping
+2025-12-07 15:47:39 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 15:47:39 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 15:47:39 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 15:47:39 +05:30: ⚠️ Invalid or missing FCM token for deep.p@yopmail.com, skipping
+2025-12-07 15:47:41 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 15:47:41 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 15:47:41 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 15:47:41 +05:30: ⚠️ Invalid or missing FCM token for deep.p@yopmail.com, skipping
+2025-12-07 16:11:07 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 16:11:07 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 16:11:07 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 16:11:07 +05:30: ⚠️ Invalid or missing FCM token for deep.p@yopmail.com, skipping
+2025-12-07 16:11:44 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 16:11:44 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 16:11:44 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 16:12:07 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 16:12:07 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 16:12:07 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 16:29:02 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 16:29:02 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 16:29:02 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 16:33:24 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 16:33:24 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 16:33:24 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 16:33:34 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 16:33:34 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 16:33:34 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 16:34:38 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 16:34:38 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 16:34:38 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 16:37:14 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping push notification
+2025-12-07 17:35:30 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 17:35:30 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 17:35:30 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 17:35:38 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 17:35:38 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 17:35:38 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 17:36:23 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 17:36:23 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 17:36:23 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:24:31 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:24:31 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:24:31 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:44:22 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:44:22 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:44:22 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:44:44 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:44:44 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:44:44 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:45:14 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:45:14 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:45:14 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:45:46 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:45:46 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:45:46 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:46:11 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:46:11 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:46:11 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:48:39 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:48:39 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:48:39 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:49:09 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:49:09 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:49:09 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:49:47 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:49:47 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:49:47 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:54:56 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:54:56 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:54:56 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping
+2025-12-07 18:55:05 +05:30: ⚠️ Invalid or missing FCM token for john.doe@example.com, skipping
+2025-12-07 18:55:05 +05:30: ⚠️ Invalid or missing FCM token for john.d@example.com, skipping
+2025-12-07 18:55:05 +05:30: ⚠️ Invalid or missing FCM token for dhruvin.patel@yopmail.com, skipping

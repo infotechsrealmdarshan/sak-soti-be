@@ -76,7 +76,7 @@ const conditionalPostMediaUpload = (req, res, next) => {
  *       200:
  *         description: Posts retrieved successfully
  */
-router.get("/", auth, adminOnly, getAllPosts);
+router.get("/", auth, getAllPosts);
 
 /**
  * @swagger

@@ -9,25 +9,18 @@ initializeFirebase(); // Ensure Firebase is initialized once
 export const isValidFCMToken = (token) => {
   if (!token || typeof token !== 'string') return false;
 
-  const cleanToken = token.trim();
+  const trimmed = token.trim();// Basic length check (FCM tokens are typically 150+ characters)
+  if (trimmed.length < 100 || trimmed.length > 500) return false;
 
-  if (cleanToken.length < 140 || cleanToken.length > 200) return false;
+  // Format check: should have colon and valid characters
+  if (!trimmed.includes(':')) return false;
 
-  if (!cleanToken.includes(':')) return false;
+  const parts = trimmed.split(':');
+  if (parts.length !== 2) return false;
 
-  const placeholderPatterns = [
-    /^test.*token$/i,
-    /^placeholder/i,
-    /^fake.*token$/i,
-    /^d9Hk/i,
-    /\.\.\./
-  ];
-
-  for (const pattern of placeholderPatterns) {
-    if (pattern.test(cleanToken)) return false;
-  }
-
-  return true;
+  // Character validation
+  const validChars = /^[a-zA-Z0-9:_-]+$/;
+  return validChars.test(trimmed);
 };
 
 /**
