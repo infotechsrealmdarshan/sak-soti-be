@@ -9,189 +9,46 @@ import { sendFirebaseNotification } from "../../utils/firebaseHelper.js";
 import mongoose from "mongoose";
 import redisClient from "../../config/redis.js";
 import ChatConversation from "../../models/ChatConversation.js";
-
-// Helper function to delete Redis keys by pattern
-const deleteRedisKeysByPattern = async (pattern) => {
-  if (!redisClient || typeof redisClient.scan !== "function") return;
-  try {
-    let cursor = "0";
-    do {
-      const [nextCursor, keys] = await redisClient.scan(cursor, "MATCH", pattern, "COUNT", 50);
-      cursor = nextCursor;
-      if (Array.isArray(keys) && keys.length > 0) {
-        await redisClient.del(...keys);
-      }
-    } while (cursor !== "0");
-  } catch (err) {
-    console.warn(`Redis delete failed for pattern ${pattern}:`, err.message);
-  }
-};
-
-const calculateMembersCount = (group) => {
-  const uniqueUsers = new Set();
-  if (group.groupAdmin) uniqueUsers.add(String(group.groupAdmin));
-  (group.superAdmins || []).forEach(admin => uniqueUsers.add(String(admin)));
-  (group.members || []).forEach(member => uniqueUsers.add(String(member)));
-  return uniqueUsers.size;
-};
-
-const cleanChatRequest = (req, userId, type) => {
-  const obj = req.toObject ? req.toObject() : req;
-
-  // Remove unnecessary fields
-  delete obj.messages;
-  delete obj.__v;
-  delete obj.pendingMembers;
-  delete obj.isSystemGroup;
-
-  // For individual chats
-  if (obj.chatType === 'individual') {
-    const isCurrentUserSender = String(obj.senderId._id) === String(userId);
-    obj.partnerInfo = isCurrentUserSender ? obj.receiverId : obj.senderId;
-
-    // Clean partnerInfo structure
-    if (obj.partnerInfo) {
-      obj.partnerInfo = {
-        _id: obj.partnerInfo._id,
-        firstname: obj.partnerInfo.firstname,
-        lastname: obj.partnerInfo.lastname,
-        email: obj.partnerInfo.email,
-        profileimg: obj.partnerInfo.profileimg,
-        isDeleted: obj.partnerInfo.isDeleted || false,
-        isGroup: false,
-        membersCount: 1
-      };
-    }
-
-    // Clean senderId/receiverId for individual chats
-    if (obj.senderId && typeof obj.senderId === 'object') {
-      obj.senderId = {
-        _id: obj.senderId._id,
-        firstname: obj.senderId.firstname,
-        lastname: obj.senderId.lastname,
-        email: obj.senderId.email,
-        profileimg: obj.senderId.profileimg,
-        isDeleted: obj.senderId.isDeleted || false
-      };
-    }
-
-    if (obj.receiverId && typeof obj.receiverId === 'object') {
-      obj.receiverId = {
-        _id: obj.receiverId._id,
-        firstname: obj.receiverId.firstname,
-        lastname: obj.receiverId.lastname,
-        email: obj.receiverId.email,
-        profileimg: obj.receiverId.profileimg,
-        isDeleted: obj.receiverId.isDeleted || false
-      };
-    }
-  }
-
-  // For group chats - MAKE CONSISTENT WITH INDIVIDUAL CHATS
-  else if (obj.chatType === 'group' && obj.receiverId === null) {
-    // ✅ For group chats, set senderId to group creator and receiverId to null
-    // This maintains consistency with individual chat structure
-    if (obj.groupAdmin && typeof obj.groupAdmin === 'object') {
-      obj.senderId = {
-        _id: obj.groupAdmin._id,
-        firstname: obj.groupAdmin.firstname,
-        lastname: obj.groupAdmin.lastname,
-        email: obj.groupAdmin.email,
-        profileimg: obj.groupAdmin.profileimg,
-        isDeleted: obj.groupAdmin.isDeleted || false
-      };
-    } else if (obj.groupAdmin) {
-      // If groupAdmin is just an ID, create minimal object
-      obj.senderId = {
-        _id: obj.groupAdmin,
-        firstname: "Group",
-        lastname: "Creator",
-        email: "",
-        profileimg: "/uploads/default.png",
-        isDeleted: false
-      };
-    }
-
-    // ✅ Always set receiverId to null for group chats
-    obj.receiverId = null;
-
-    // ✅ Keep partnerInfo for group identification
-    obj.partnerInfo = {
-      _id: String(obj._id),
-      firstname: obj.name || "Group",
-      lastname: "",
-      email: "",
-      profileimg: obj.groupImage || "/uploads/group-default.png",
-      isGroup: true,
-      membersCount: calculateMembersCount(obj),
-      isDeleted: false
-    };
-
-    // Clean up group-specific fields
-    if (obj.superAdmins && Array.isArray(obj.superAdmins)) {
-      obj.superAdmins = obj.superAdmins.map(admin => ({
-        _id: admin._id,
-        firstname: admin.firstname,
-        lastname: admin.lastname,
-        email: admin.email,
-        profileimg: admin.profileimg,
-        isDeleted: admin.isDeleted || false
-      }));
-    }
-
-    if (obj.members && Array.isArray(obj.members)) {
-      obj.members = obj.members.map(member => ({
-        _id: member._id,
-        firstname: member.firstname,
-        lastname: member.lastname,
-        email: member.email,
-        profileimg: member.profileimg,
-        isDeleted: member.isDeleted || false
-      }));
-    }
-  }
-
-  return obj;
-};
+import { checkUserDeleted } from "../../utils/chatHelper.js";
+// ... other imports
 
 export const sendChatRequest = asyncHandler(async (req, res) => {
   const senderId = req.user?.id;
   const { postId } = req.body;
 
-  if (!senderId) return errorResponse(res, "Unauthorized", 401);
-  if (!postId) return errorResponse(res, "postId is required", 400);
+  if (!senderId) return errorResponse(res, "Unauthorized", 404);
+  if (!postId) return errorResponse(res, "postId is required", 404);
 
   // ✅ Validate ObjectId
   if (!mongoose.Types.ObjectId.isValid(postId)) {
-    return errorResponse(res, "Post id not found", 404);
+    return successResponse(res, "Post id not found", null, null, 200, 0);
   }
 
   const post = await Post.findById(postId).populate({ path: "author", select: "_id" });
-  if (!post) return errorResponse(res, "Post id not found", 404);
+  if (!post) return successResponse(res, "Post id not found", null, null, 200, 0);
 
   const receiverId = post.author?._id?.toString();
   if (!receiverId)
-    return errorResponse(res, "Receiver user not found for post", 404);
+    return successResponse(res, "Receiver user not found for post", null, null, 200, 0);
   if (String(senderId) === String(receiverId))
-    return errorResponse(res, "You cannot send request to your own user", 400);
+    return errorResponse(res, "You cannot send request to your own user", 404);
 
   const sender = req.user;
   const receiver = await User.findById(receiverId).select(
     "firstname lastname email isSubscription isAdmin fcmToken"
   );
-  if (!receiver) return errorResponse(res, "Receiver not found", 404);
+  if (!receiver) return successResponse(res, "Receiver not found", null, null, 200, 0);
 
-  // ✅ FIX: Check ONLY current user (sender) subscription
-  if (!sender) return errorResponse(res, "Sender not found", 404);
-
-  const senderAllowed = !!(sender.isSubscription || sender.isAdmin);
-
-  // ✅ FIX: Only check sender subscription, NOT receiver
-  if (!senderAllowed) {
-    return errorResponse(
+  const senderAllowed = !!(sender && (sender.isSubscription || sender.isAdmin));
+  const receiverAllowed = !!(receiver && (receiver.isSubscription || receiver.isAdmin));
+  if (!senderAllowed || !receiverAllowed) {
+    return successResponse(
       res,
-      "You must have an active subscription (or be an admin) to send chat requests",
-      403
+      "Both users must have an active subscription (or be an admin) to use chat",
+      null,
+      null,
+      200,
+      0
     );
   }
 
@@ -202,9 +59,8 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
     chatType,
     status: "pending",
   });
-
   if (existing)
-    return errorResponse(res, "A pending request already exists", 200, 0);
+    return successResponse(res, "A pending request already exists", null, null, 200, 0);
 
   const request = await ChatRequest.create({ senderId, receiverId, chatType });
 
@@ -241,10 +97,21 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
   // ✅ Create and send notification
   try {
     const title = "Receive new request!";
-    const senderForNotification = await User.findById(senderId).select("firstname lastname email");
-    console.log("Sender info for notification:", senderForNotification.firstname, senderForNotification.lastname);
-    const senderName = `${senderForNotification.firstname || ""} ${senderForNotification.lastname || ""}`.trim() || senderForNotification.email;
+    const sender = await User.findById(senderId).select("firstname lastname email");
+    console.log("Sender info for notification:", sender.firstname, sender.lastname);
+    const senderName = `${sender.firstname || ""} ${sender.lastname || ""}`.trim() || sender.email;
     const message = `${senderName} wants to start a chat with you.`;
+
+    // DEBUG: Check the actual token in database
+    console.log("🔍 DEBUG - Checking receiver FCM token:");
+    console.log("Receiver ID:", receiverId);
+    console.log("Receiver FCM Token from DB:", receiver.fcmToken);
+    console.log("Token exists:", !!receiver.fcmToken);
+
+    if (receiver.fcmToken) {
+      console.log("Token length:", receiver.fcmToken.length);
+      console.log("Token starts with:", receiver.fcmToken.substring(0, 20) + "...");
+    }
 
     // 1️⃣ Save to DB
     const notification = await Notification.create({
@@ -256,14 +123,11 @@ export const sendChatRequest = asyncHandler(async (req, res) => {
 
     // 2️⃣ Send Firebase push
     if (receiver.fcmToken) {
-      const payload = { type: "chat_request", senderId: senderId.toString(), deeplink: "", chatId: populated._id.toString() };
-      console.log("🔔 Sending chat_request Notification Payload:", JSON.stringify(payload, null, 2));
-
       const pushResult = await sendFirebaseNotification(
         receiver.fcmToken,
         title,
         message,
-        payload
+        { type: "chat_request", senderId: senderId.toString(), deeplink: "" }
       );
 
       notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -308,7 +172,7 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
 
   if (!mongoose.Types.ObjectId.isValid(id)) {
-    return errorResponse(res, "Invalid chat request ID", 400);
+    return successResponse(res, "Invalid chat request ID", null, null, 200, 0);
   }
 
   if (!["accept", "reject"].includes(action)) {
@@ -317,31 +181,15 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
 
   const request = await ChatRequest.findById(id);
   if (!request) {
-    return errorResponse(res, "Chat request not found", 404);
+    return successResponse(res, "Chat request not found", null, null, 200, 0);
   }
 
   if (String(request.receiverId) !== String(userId)) {
     return errorResponse(res, "Only the receiver can act on this request", 403);
   }
 
-  const sender = await User.findById(request.senderId).select("firstname lastname email fcmToken isSubscription isAdmin");
-  const receiver = await User.findById(request.receiverId).select("firstname lastname email fcmToken isSubscription isAdmin");
-
-  if (!sender || !receiver) {
-    return errorResponse(res, "User not found", 404);
-  }
-
-  // ✅ FIX: Check ONLY current user (receiver) subscription
-  const receiverAllowed = !!(receiver.isSubscription || receiver.isAdmin);
-
-  // ✅ FIX: Only check receiver subscription, NOT sender
-  if (!receiverAllowed) {
-    return errorResponse(
-      res,
-      "You must have an active subscription (or be an admin) to accept/reject chat requests",
-      403
-    );
-  }
+  const sender = await User.findById(request.senderId).select("firstname lastname email fcmToken");
+  const receiver = await User.findById(request.receiverId).select("firstname lastname email fcmToken");
 
   const receiverName =
     `${receiver.firstname || ""} ${receiver.lastname || ""}`.trim() || receiver.email;
@@ -371,19 +219,9 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
       console.error("Socket emit error (rejected):", err.message);
     }
 
-    // Redis clear - use pattern matching to clear all cache keys with pagination/search params
+    // Redis clear
     try {
-      const patterns = [
-        `requests:${String(request.senderId)}:received:*`,
-        `requests:${String(request.senderId)}:sent:*`,
-        `requests:${String(request.senderId)}:accepted:*`,
-        `requests:${String(request.receiverId)}:received:*`,
-        `requests:${String(request.receiverId)}:sent:*`,
-        `requests:${String(request.receiverId)}:accepted:*`,
-      ];
-
-      // Also clear exact keys without pagination (for backward compatibility)
-      const exactKeys = [
+      const cacheKeys = [
         `requests:${String(request.senderId)}:received`,
         `requests:${String(request.senderId)}:sent`,
         `requests:${String(request.senderId)}:accepted`,
@@ -391,11 +229,7 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
         `requests:${String(request.receiverId)}:sent`,
         `requests:${String(request.receiverId)}:accepted`,
       ];
-
-      await Promise.all([
-        ...patterns.map(pattern => deleteRedisKeysByPattern(pattern)),
-        redisClient.del(exactKeys)
-      ]);
+      await redisClient.del(cacheKeys);
     } catch (err) {
       console.warn("Redis clear error:", err.message);
     }
@@ -415,14 +249,11 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
       console.log(`🔔 Notification created for reject ${sender._id}: ${notification}`);
 
       if (sender.fcmToken) {
-        const payload = { type: "chat_request_reject", senderId: receiver._id.toString(), deeplink: "", chatId: id.toString() };
-        console.log("🔔 Sending chat_request_reject Notification Payload:", JSON.stringify(payload, null, 2));
-
         const pushResult = await sendFirebaseNotification(
           sender.fcmToken,
           title,
           message,
-          payload
+          { type: "chat_request_reject", senderId: receiver._id.toString(), deeplink: "" }
         );
 
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -438,11 +269,6 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
   // ===========================================================
   // 🔸 ACCEPT FLOW
   // ===========================================================
-  // ✅ Check if already accepted to prevent duplicate processing
-  if (request.status === "accepted") {
-    return successResponse(res, "Chat request already accepted", request, null, 200, 1);
-  }
-
   request.status = "accepted";
   await request.save();
 
@@ -502,14 +328,11 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
           if (groupAdmin?.fcmToken) {
             const title = "New Member Joined";
             const message = `${receiverName} has joined your group “${groupRoot.name}”.`;
-            const payload = {
+            await sendFirebaseNotification(groupAdmin.fcmToken, title, message, {
               type: "group_member_join",
               groupId: String(groupRoot._id),
               memberId: String(receiver._id),
-              chatId: String(groupRoot._id)
-            };
-            console.log("🔔 Sending group_member_join Notification Payload:", JSON.stringify(payload, null, 2));
-            await sendFirebaseNotification(groupAdmin.fcmToken, title, message, payload);
+            });
           }
         } catch (err) {
           console.warn("Notification error (group admin):", err.message);
@@ -518,20 +341,15 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
     }
   }
 
-  // Redis clear - use pattern matching to clear all cache keys with pagination/search params
-  // ✅ Clear cache BEFORE emitting socket events to ensure fresh data
-  try {
-    const patterns = [
-      `requests:${String(request.senderId)}:received:*`,
-      `requests:${String(request.senderId)}:sent:*`,
-      `requests:${String(request.senderId)}:accepted:*`,
-      `requests:${String(request.receiverId)}:received:*`,
-      `requests:${String(request.receiverId)}:sent:*`,
-      `requests:${String(request.receiverId)}:accepted:*`,
-    ];
+  const populated = await request.populate([
+    { path: "senderId", select: "firstname lastname email profileimg" },
+    { path: "receiverId", select: "firstname lastname email profileimg" },
+    { path: "groupId" },
+  ]);
 
-    // Also clear exact keys without pagination (for backward compatibility)
-    const exactKeys = [
+  // Redis clear
+  try {
+    const cacheKeys = [
       `requests:${String(request.senderId)}:received`,
       `requests:${String(request.senderId)}:sent`,
       `requests:${String(request.senderId)}:accepted`,
@@ -539,29 +357,10 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
       `requests:${String(request.receiverId)}:sent`,
       `requests:${String(request.receiverId)}:accepted`,
     ];
-
-    await Promise.all([
-      ...patterns.map(pattern => deleteRedisKeysByPattern(pattern)),
-      redisClient.del(exactKeys)
-    ]);
-    console.log(`✅ Cache cleared for sender ${request.senderId} and receiver ${request.receiverId}`);
+    await redisClient.del(cacheKeys);
   } catch (err) {
     console.warn("Redis clear error:", err.message);
   }
-
-  // ✅ Get fresh populated request after cache clear and save
-  const populated = await ChatRequest.findById(request._id).populate([
-    { path: "senderId", select: "firstname lastname email profileimg" },
-    { path: "receiverId", select: "firstname lastname email profileimg" },
-    { path: "groupId" },
-  ]);
-
-  if (!populated) {
-    return errorResponse(res, "Failed to fetch updated request", 500);
-  }
-
-  // Ensure populated request has the accepted status
-  populated.status = "accepted";
 
   // Emit socket updates
   try {
@@ -579,52 +378,8 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
     io.to(`user:${request.receiverId}`).emit("chatRequest:accepted", payload);
     io.to(`user:${request.senderId}`).emit("chatRequests:update");
     io.to(`user:${request.receiverId}`).emit("chatRequests:update");
-
-    // ✅ NEW: Emit specific chatList:update events to update tabs
-    // Format the populated request for accepted tab
-    const formattedRequest = populated.toObject ? populated.toObject() : populated;
-
-    // Add partnerInfo for individual chats
-    if (formattedRequest.chatType === "individual") {
-      // For receiver: partner is sender
-      formattedRequest.partnerInfo = formattedRequest.senderId;
-      // For sender: partner is receiver
-      const senderFormattedRequest = { ...formattedRequest };
-      senderFormattedRequest.partnerInfo = formattedRequest.receiverId;
-
-      // Emit to RECEIVER: Remove from "received" tab, Add to "accepted" tab
-      io.to(`user:${request.receiverId}`).emit("chatList:update", {
-        type: "received",
-        action: "removed",
-        chatId: String(request._id),
-        chatRequest: formattedRequest
-      });
-      io.to(`user:${request.receiverId}`).emit("chatList:update", {
-        type: "accepted",
-        action: "added",
-        chatId: String(request._id),
-        chatRequest: formattedRequest
-      });
-
-      // Emit to SENDER: Remove from "sent" tab, Add to "accepted" tab
-      io.to(`user:${request.senderId}`).emit("chatList:update", {
-        type: "sent",
-        action: "removed",
-        chatId: String(request._id),
-        chatRequest: senderFormattedRequest
-      });
-      io.to(`user:${request.senderId}`).emit("chatList:update", {
-        type: "accepted",
-        action: "added",
-        chatId: String(request._id),
-        chatRequest: senderFormattedRequest
-      });
-    }
-
-    console.log(`✅ Chat request accepted - socket events emitted to sender ${request.senderId} and receiver ${request.receiverId}`);
   } catch (err) {
     console.error("Socket emit error (accepted):", err.message);
-    // Don't fail the request if socket emit fails, but log it
   }
 
   // Send notification
@@ -649,7 +404,7 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
         sender.fcmToken,
         title,
         message,
-        { type: "chat_request_accept", senderId: receiver._id.toString(), deeplink: "", chatId: request._id.toString() }
+        { type: "chat_request_accept", senderId: receiver._id.toString(), deeplink: "" }
       );
 
       notification.firebaseStatus = pushResult.success ? "sent" : "failed";
@@ -664,20 +419,6 @@ export const actOnChatRequest = asyncHandler(async (req, res) => {
 
 export const getMyReceivedRequests = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
-
-  // ✅ ADD: Check user subscription
-  const user = await User.findById(userId).select("isSubscription isAdmin");
-  if (!user) return errorResponse(res, "User not found", 404);
-
-  const userAllowed = !!(user.isSubscription || user.isAdmin);
-  if (!userAllowed) {
-    return errorResponse(
-      res,
-      "You must have an active subscription (or be an admin) to view chat requests",
-      403
-    );
-  }
-
   const requests = await ChatRequest.find({ receiverId: userId, status: "pending" })
     .populate([
       { path: "senderId", select: "firstname lastname email" },
@@ -689,20 +430,6 @@ export const getMyReceivedRequests = asyncHandler(async (req, res) => {
 
 export const getMySentRequests = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
-
-  // ✅ ADD: Check user subscription
-  const user = await User.findById(userId).select("isSubscription isAdmin");
-  if (!user) return errorResponse(res, "User not found", 404);
-
-  const userAllowed = !!(user.isSubscription || user.isAdmin);
-  if (!userAllowed) {
-    return errorResponse(
-      res,
-      "You must have an active subscription (or be an admin) to view chat requests",
-      403
-    );
-  }
-
   const requests = await ChatRequest.find({ senderId: userId, status: "pending" })
     .populate([
       { path: "senderId", select: "firstname lastname email" },
@@ -714,34 +441,17 @@ export const getMySentRequests = asyncHandler(async (req, res) => {
 
 export const getMyAcceptedRequests = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
-
-  // ✅ ADD: Check user subscription
-  const user = await User.findById(userId).select("isSubscription isAdmin");
-  if (!user) return errorResponse(res, "User not found", 404);
-
-  const userAllowed = !!(user.isSubscription || user.isAdmin);
-  if (!userAllowed) {
-    return errorResponse(
-      res,
-      "You must have an active subscription (or be an admin) to view chat requests",
-      403
-    );
-  }
-
   const requests = await ChatRequest.find({
     status: "accepted",
     $or: [{ senderId: userId }, { receiverId: userId }]
   })
     .populate([
-      { path: "senderId", select: "firstname lastname email profileimg isDeleted" },
-      { path: "receiverId", select: "firstname lastname email profileimg isDeleted" },
+      { path: "senderId", select: "firstname lastname email" },
+      { path: "receiverId", select: "firstname lastname email" },
       { path: "groupId" }
     ])
     .sort({ updatedAt: -1, createdAt: -1 });
-
-  // ✅ ADD: Format responses with consistent partnerInfo
-  const formattedRequests = requests.map(req => cleanChatRequest(req, userId, 'accepted'));
-  return successResponse(res, "Accepted requests", formattedRequests, null, 200, 1);
+  return successResponse(res, "Accepted requests", requests, null, 200, 1);
 });
 
 export const getRequestsByType = asyncHandler(async (req, res) => {
@@ -756,17 +466,9 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
     return errorResponse(res, "type must be one of: received, sent, accepted, group", 404);
   }
 
-  const user = await User.findById(userId).select("isSubscription isAdmin");
-  if (!user) return errorResponse(res, "User not found", 404);
-
   const pickLastVisibleMessageForUser = (conversation) => {
     if (!conversation || !Array.isArray(conversation.messages)) {
-      return { lastMessage: null, lastMessageTimestamp: null }; // ✅ Ensure both are null
-    }
-
-    const userAllowed = !!(user.isSubscription || user.isAdmin);
-    if (!userAllowed) {
-      return { lastMessage: null, lastMessageTimestamp: null }; // ✅ Ensure both are null
+      return { lastMessage: null, lastMessageTimestamp: null };
     }
 
     const deletedForCurrentUser = new Set();
@@ -792,39 +494,37 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       }
     }
 
-    // ✅ FIXED: Find the last visible message (same logic as before)
     for (let idx = conversation.messages.length - 1; idx >= 0; idx -= 1) {
       const msg = conversation.messages[idx];
       if (!msg) continue;
 
-      const msgIdStr = String(msg._id);
+      const msgId = String(msg._id);
       const rawSenderId = msg.sender?._id ? msg.sender._id : msg.sender;
       const senderIdStr = rawSenderId ? String(rawSenderId) : null;
-
-      // Skip if message is deleted
       if (msg.isDeleteEvery === true) continue;
-      if (deletedForCurrentUser.has(msgIdStr)) continue;
+      if (deletedForCurrentUser.has(msgId)) continue;
       if (joinedAtDate && new Date(msg.createdAt) < joinedAtDate) continue;
 
       const senderInfo = msg.sender?._id
         ? {
-          _id: String(msg.sender._id),
-          firstname: msg.sender.firstname,
-          lastname: msg.sender.lastname,
-          email: msg.sender.email,
-          profileimg: msg.sender.profileimg,
-        }
+            _id: String(msg.sender._id),
+            firstname: msg.sender.firstname,
+            lastname: msg.sender.lastname,
+            email: msg.sender.email,
+            profileimg: msg.sender.profileimg,
+          }
         : msg.sender
-          ? {
+        ? {
             _id: String(msg.sender),
           }
-          : null;
+        : null;
 
-      const isCurrentUserSender = senderIdStr && String(senderIdStr) === String(userId);
+      const isCurrentUserSender =
+        senderIdStr && String(senderIdStr) === String(userId);
 
       return {
         lastMessage: {
-          _id: msgIdStr,
+          _id: msgId,
           chatRequestId: conversation.chatRequestId
             ? String(conversation.chatRequestId)
             : null,
@@ -841,25 +541,11 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       };
     }
 
-    // ✅ FIX: Return both as null when no visible messages found
     return { lastMessage: null, lastMessageTimestamp: null };
   };
 
   // ========== GROUP CHAT HANDLING (EXISTING CODE - NO CHANGES) ==========
   if (type === "group") {
-    // ✅ ADD: Check user subscription for group access
-    const user = await User.findById(userId).select("isSubscription isAdmin");
-    if (!user) return errorResponse(res, "User not found", 404);
-
-    const userAllowed = !!(user.isSubscription || user.isAdmin);
-    if (!userAllowed) {
-      return errorResponse(
-        res,
-        "You must have an active subscription (or be an admin) to view group chats",
-        403
-      );
-    }
-
     const cacheKey = `requests:${String(userId)}:group:page:${page}:limit:${limit}:search:${search}`;
     const cached = await redisClient.get(cacheKey);
     if (cached) {
@@ -884,7 +570,6 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
     const totalGroups = await ChatRequest.countDocuments(groupQuery);
     const groups = await ChatRequest.find(groupQuery)
       .populate([
-        { path: "senderId", select: "firstname lastname email profileimg isDeleted" },
         { path: "groupAdmin", select: "firstname lastname email profileimg isDeleted" },
         { path: "superAdmins", select: "firstname lastname email profileimg isDeleted" },
         { path: "members", select: "firstname lastname email profileimg isDeleted" }
@@ -892,11 +577,9 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       .sort({ updatedAt: -1 })
       .skip(skip)
       .limit(limit);
-    // ✅ Remove deleted users from groups automatically and filter out groups with deleted admins
-    const validGroups = groups.filter(group =>
-      !(group.groupAdmin && group.groupAdmin.isDeleted === true)
-    );
 
+    // ✅ Remove deleted users from groups automatically and filter out groups with deleted admins
+    const validGroups = [];
     for (const group of groups) {
       // ✅ If groupAdmin is deleted, the group should have been deleted automatically
       // This check is just a safety net - if we find a deleted admin, skip this group
@@ -915,10 +598,10 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
           return true;
         });
-
+        
         // If deleted users were found, remove them from the group
         if (deletedMemberIds.length > 0) {
-          const deletedObjectIds = deletedMemberIds.map(id =>
+          const deletedObjectIds = deletedMemberIds.map(id => 
             mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
           );
           await ChatRequest.findByIdAndUpdate(group._id, {
@@ -930,7 +613,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           });
         }
       }
-
+      
       // Filter deleted users from superAdmins
       if (group.superAdmins && Array.isArray(group.superAdmins)) {
         const deletedAdminIds = [];
@@ -941,9 +624,9 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
           return true;
         });
-
+        
         if (deletedAdminIds.length > 0) {
-          const deletedObjectIds = deletedAdminIds.map(id =>
+          const deletedObjectIds = deletedAdminIds.map(id => 
             mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id
           );
           await ChatRequest.findByIdAndUpdate(group._id, {
@@ -954,7 +637,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
 
       validGroups.push(group);
     }
-
+    
     // Replace groups array with valid groups only
     groups.length = 0;
     groups.push(...validGroups);
@@ -964,103 +647,31 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
       .populate({ path: "messages.sender", select: "firstname lastname email profileimg" });
     const convoMap = new Map(conversations.map(c => [c.chatRequestId.toString(), c]));
 
-    // ✅ Get current user data BEFORE the map function
-    const currentUser = await User.findById(userId).select("firstname lastname email profileimg isDeleted");
-
-    // ✅ Create a fallback user object in case currentUser is null
-    const fallbackUser = {
-      _id: userId,
-      firstname: "Current",
-      lastname: "User",
-      email: "",
-      profileimg: "/uploads/default.png",
-      isDeleted: false
-    };
-
     const data = groups.map(g => {
       const creatorIdStr = g.groupAdmin?._id?.toString();
       const adminIdSet = new Set((g.superAdmins || []).map(a => a._id.toString()));
-
-      // ✅ Combine members and creator for display (Creator + Members)
-      let membersToDisplay = [...(g.members || [])];
-      if (g.groupAdmin && !g.groupAdmin.isDeleted) {
-        // Ensure creator is not duplicated
-        if (!membersToDisplay.some(m => String(m._id) === creatorIdStr)) {
-          membersToDisplay.unshift(g.groupAdmin); // Add creator to the top
-        }
-      }
-
-      const filteredMembers = membersToDisplay.filter(m => {
+      const filteredMembers = (g.members || []).filter(m => {
         if (!m) return false;
         // Filter out deleted users
         if (m.isDeleted === true) return false;
         const mid = m._id.toString();
-        // Exclude super admins, but ALLOW creator
-        return !adminIdSet.has(mid);
+        return mid !== creatorIdStr && !adminIdSet.has(mid);
       });
 
-      const enhancedMembers = filteredMembers.map(member => {
-        if (!member) return null;
+      const allUniqueUserIds = new Set();
+      if (g.groupAdmin?._id && !g.groupAdmin.isDeleted) allUniqueUserIds.add(g.groupAdmin._id.toString());
+      (g.superAdmins || []).forEach((a) => { if (a._id && !a.isDeleted) allUniqueUserIds.add(a._id.toString()); });
+      (g.members || []).forEach((m) => { if (m._id && !m.isDeleted) allUniqueUserIds.add(m._id.toString()); });
 
-        const memberIdStr = String(member._id);
-        let userType = 'member'; // default
-
-        if (memberIdStr === creatorIdStr) {
-          userType = 'creator';
-        } else if (adminIdSet.has(memberIdStr)) {
-          userType = 'superAdmin';
-        }
-
-        return {
-          _id: member._id,
-          firstname: member.firstname,
-          lastname: member.lastname,
-          email: member.email,
-          profileimg: member.profileimg,
-          isDeleted: member.isDeleted || false,
-          userType: userType // ✅ ADDED: This identifies the role
-        };
-      }).filter(m => m !== null);
-
-      // ✅ Count only displayed members (Creator + Members, excluding Super Admins)
-      const membersCount = enhancedMembers.length;
-
+      const membersCount = allUniqueUserIds.size;
       const obj = g.toObject();
-
-      // ✅ ADD: Include groupName field in the response
-      obj.groupName = g.name || "Group";
-
-      obj.members = enhancedMembers;
-      obj.membersCount = membersCount; // Update count to reflect displayed members
-
-      // ✅ Remove admin fields as requested
-      delete obj.groupAdmin;
-      delete obj.superAdmins;
-
-      // ✅ Use the pre-fetched currentUser data (no await needed here)
-      if (currentUser) {
-        obj.senderId = {
-          _id: currentUser._id,
-          firstname: currentUser.firstname,
-          lastname: currentUser.lastname,
-          email: currentUser.email,
-          profileimg: currentUser.profileimg,
-          isDeleted: currentUser.isDeleted || false
-        };
-        console.log(`  ✅ Using current user as senderId: ${currentUser.firstname} ${currentUser.lastname}`);
-      } else {
-        // Fallback if current user not found
-        obj.senderId = fallbackUser;
-        console.log(`  ⚠️ Using current user ID as senderId: ${userId}`);
-      }
-
-
-      // ✅ Always set receiverId to null for group chats
-      obj.receiverId = null;
-
-      console.log('  Final senderId:', obj.senderId);
-
-      // ✅ partnerInfo removed for groups - not needed
+      if (obj.messages) delete obj.messages;
+      obj.membersCount = membersCount;
+      obj.isOwner = creatorIdStr === String(userId);
+      obj.members = filteredMembers;
+      obj.groupImage = g.groupImage || null;
+      obj.lastMessage = null;
+      obj.lastMessageTimestamp = obj.updatedAt || obj.createdAt;
 
       let unreadCount = 0;
       const pendingMembers = [];
@@ -1081,15 +692,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
             });
           }
 
-          // ✅ Fix: Use enhancedMembers to get user IDs (excludes super admins as requested)
-          const allUserIds = enhancedMembers.map(m => String(m._id));
-
-          // If current user is a super admin (and thus hidden), we might want to add them here 
-          // just to calculate their unreadCount, but for now we follow the "hide super admin" rule strictly.
-          // If the current user needs to see their own unread count even if hidden, we'd need to add:
-          if (!allUserIds.includes(String(userId))) {
-            allUserIds.push(String(userId));
-          }
+          const allUserIds = Array.from(allUniqueUserIds);
           const joinedAtByUser = convo.joinedAtByUser;
 
           for (const uid of allUserIds) {
@@ -1103,34 +706,41 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
             let count = 0;
 
             if (lastReadAt) {
-              const lastReadDate = new Date(lastReadAt);
-              count = convo.messages.reduce((acc, m) => {
-                if (!m) return acc;
+              count = convo.messages.reduce(
+                (acc, m) => {
+                  if (!m) return acc;
+                  const msgIdStr = String(m._id);
+                  const isRemovedForEveryone = m.isDeleteEvery === true;
+                  const isRemovedForCurrentUser =
+                    String(uid) === String(userId) && deletedForCurrentUser.has(msgIdStr);
 
-                const msgIdStr = String(m._id);
-                const msgDate = new Date(m.createdAt);
+                  if (isRemovedForEveryone || isRemovedForCurrentUser) {
+                    return acc;
+                  }
 
-                // Skip if message is deleted
-                if (m.isDeleteEvery === true) return acc;
-                if (deletedForCurrentUser.has(msgIdStr)) return acc;
-                if (joinedAtDate && msgDate < joinedAtDate) return acc;
+                  if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
+                    return acc;
+                  }
 
-                // ✅ FIX: Only count if message is after last read time
-                return acc + (msgDate > lastReadDate ? 1 : 0);
-              }, 0);
+                  return acc + (new Date(m.createdAt) > new Date(lastReadAt) ? 1 : 0);
+                },
+                0
+              );
             } else {
-              // If no lastReadAt, count all visible messages as unread
               count = convo.messages.reduce((acc, m) => {
                 if (!m) return acc;
-
                 const msgIdStr = String(m._id);
-                const msgDate = new Date(m.createdAt);
+                const isRemovedForEveryone = m.isDeleteEvery === true;
+                const isRemovedForCurrentUser =
+                  String(uid) === String(userId) && deletedForCurrentUser.has(msgIdStr);
 
-                // Skip if message is deleted
-                if (m.isDeleteEvery === true) return acc;
-                if (deletedForCurrentUser.has(msgIdStr)) return acc;
-                if (joinedAtDate && msgDate < joinedAtDate) return acc;
+                if (isRemovedForEveryone || isRemovedForCurrentUser) {
+                  return acc;
+                }
 
+                if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
+                  return acc;
+                }
                 return acc + 1;
               }, 0);
             }
@@ -1140,31 +750,17 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
 
           const { lastMessage, lastMessageTimestamp } = pickLastVisibleMessageForUser(convo);
-
-          // ✅ FIX: Only set lastMessage and lastMessageTimestamp if there's actually a message
-          if (lastMessage) {
-            obj.lastMessage = lastMessage;
-            obj.lastMessageTimestamp = lastMessageTimestamp;
-          } else {
-            obj.lastMessage = null;
-            obj.lastMessageTimestamp = null; // ✅ Set to null when no messages
-          }
-        } else {
-          // ✅ FIX: If no conversation or messages, set both to null
-          obj.lastMessage = null;
-          obj.lastMessageTimestamp = null;
+          obj.lastMessage = lastMessage;
+          obj.lastMessageTimestamp = lastMessageTimestamp || obj.updatedAt || obj.createdAt;
         }
       } catch (err) {
         console.error("Error computing unread count:", err);
-        // ✅ FIX: Set to null on error as well
-        obj.lastMessage = null;
-        obj.lastMessageTimestamp = null;
       }
 
       obj.unreadCount = unreadCount;
       obj.pendingMembers = pendingMembers.map(pm => ({
         userId: pm.userId,
-        count: pm.count,
+        count: pm.count > 9 ? "9+" : pm.count,
       }));
 
       return obj;
@@ -1178,7 +774,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
     };
 
     const responseData = { message: "Groups", data, pagination };
-    try { await redisClient.setEx(cacheKey, 10, JSON.stringify(responseData)); } catch { }
+    try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
 
     // ✅ EMIT SOCKET EVENT FOR GROUP LIST UPDATE
     try {
@@ -1322,19 +918,6 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
             };
           }
 
-          if (type === "accepted" && obj.chatType === "individual") {
-            // Determine who is the partner (the other user in the chat)
-            const isCurrentUserSender = String(obj.senderId._id) === String(userId);
-            obj.partnerInfo = isCurrentUserSender ? obj.receiverId : obj.senderId;
-
-            // Ensure partnerInfo has consistent structure
-            if (obj.partnerInfo) {
-              obj.partnerInfo.isGroup = false;
-              obj.partnerInfo.membersCount = 1;
-            }
-          }
-
-
           let unreadCount = 0;
           let lastMessage = null;
           let lastMessageTimestamp = null;
@@ -1359,36 +942,24 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
                 });
               }
 
-              // ✅ FIXED: Calculate unread count correctly (only messages after lastReadAt)
+              const isVisibleMessage = (m) => {
+                if (!m) return false;
+                const msgIdStr = String(m._id);
+                if (m.isDeleteEvery === true) return false;
+                if (deletedForCurrentUser.has(msgIdStr)) return false;
+                return true;
+              };
+
+              const visibleMessages = convo.messages.filter(isVisibleMessage);
+
+              // ✅ Calculate unread count for current user
               if (lastReadAt) {
                 const lastReadDate = new Date(lastReadAt);
-                unreadCount = convo.messages.reduce((acc, m) => {
-                  if (!m) return acc;
-
-                  const msgIdStr = String(m._id);
-                  const msgDate = new Date(m.createdAt);
-
-                  // Skip if message is deleted
-                  if (m.isDeleteEvery === true) return acc;
-                  if (deletedForCurrentUser.has(msgIdStr)) return acc;
-
-                  // ✅ FIX: Only count if message is after last read time
-                  return acc + (msgDate > lastReadDate ? 1 : 0);
+                unreadCount = visibleMessages.reduce((acc, m) => {
+                  return acc + (new Date(m.createdAt) > lastReadDate ? 1 : 0);
                 }, 0);
               } else {
-                // If no lastReadAt, count all visible messages as unread
-                unreadCount = convo.messages.reduce((acc, m) => {
-                  if (!m) return acc;
-
-                  const msgIdStr = String(m._id);
-                  const msgDate = new Date(m.createdAt);
-
-                  // Skip if message is deleted
-                  if (m.isDeleteEvery === true) return acc;
-                  if (deletedForCurrentUser.has(msgIdStr)) return acc;
-
-                  return acc + 1;
-                }, 0);
+                unreadCount = visibleMessages.length;
               }
 
               // ✅ Get last message and timestamp for sorting
@@ -1402,7 +973,7 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
           }
 
           // ✅ Add enhanced fields to response
-          obj.unreadCount = unreadCount;
+          obj.unreadCount = unreadCount > 9 ? "9+" : unreadCount;
           obj.lastMessage = lastMessage;
           obj.lastMessageTimestamp = lastMessageTimestamp || obj.updatedAt || obj.createdAt;
         }
@@ -1462,124 +1033,4 @@ export const getRequestsByType = asyncHandler(async (req, res) => {
   return successResponse(res, `Requests (${type})`, paginatedRequests, pagination, 200, 1);
 });
 
-export const getChatRequestDetails = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const userId = req.user?.id;
-
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    return errorResponse(res, "Invalid chat request ID", 400);
-  }
-
-  const request = await ChatRequest.findById(id)
-    .populate([
-      { path: "senderId", select: "firstname lastname email profileimg isDeleted" },
-      { path: "receiverId", select: "firstname lastname email profileimg isDeleted" },
-      { path: "groupAdmin", select: "firstname lastname email profileimg isDeleted" },
-      { path: "superAdmins", select: "firstname lastname email profileimg isDeleted" },
-      { path: "members", select: "firstname lastname email profileimg isDeleted" }
-    ]);
-
-  if (!request) {
-    return errorResponse(res, "Chat request not found", 404);
-  }
-
-  // Check if user is part of the chat
-  const isParticipant =
-    String(request.senderId?._id || request.senderId) === String(userId) ||
-    String(request.receiverId?._id || request.receiverId) === String(userId) ||
-    (request.chatType === 'group' && (
-      String(request.groupAdmin?._id || request.groupAdmin) === String(userId) ||
-      (request.superAdmins || []).some(a => String(a._id || a) === String(userId)) ||
-      (request.members || []).some(m => String(m._id || m) === String(userId))
-    ));
-
-  if (!isParticipant && !req.user.isAdmin) {
-    return errorResponse(res, "You are not authorized to view this chat", 403);
-  }
-
-  const cleaned = cleanChatRequest(request, userId, request.status === 'accepted' ? 'accepted' : 'pending');
-
-  // Fetch conversation details if accepted
-  if (request.status === "accepted") {
-    const conversation = await ChatConversation.findOne({ chatRequestId: request._id })
-      .select("messages lastReadAtByUser joinedAtByUser deletedForMe")
-      .populate({ path: "messages.sender", select: "_id" });
-
-    if (conversation) {
-      // Calculate unread count
-      let lastReadTime = new Date(0);
-      if (conversation.lastReadAtByUser) {
-        const userReadTime = typeof conversation.lastReadAtByUser.get === "function"
-          ? conversation.lastReadAtByUser.get(String(userId))
-          : conversation.lastReadAtByUser[String(userId)];
-        if (userReadTime) lastReadTime = new Date(userReadTime);
-      }
-
-      const unreadMsgs = (conversation.messages || []).filter(msg => {
-        const senderIdStr = msg.sender?._id ? String(msg.sender._id) : String(msg.sender);
-        if (senderIdStr === String(userId)) return false;
-        if (msg.isDeleteEvery) return false;
-        if (conversation.deletedForMe && conversation.deletedForMe.some(d =>
-          String(d.messageId) === String(msg._id) && String(d.userId) === String(userId)
-        )) return false;
-        return new Date(msg.createdAt) > lastReadTime;
-      });
-
-      cleaned.unreadCount = unreadMsgs.length;
-
-      // Get last message logic
-      const deletedForCurrentUser = new Set();
-      if (Array.isArray(conversation.deletedForMe)) {
-        conversation.deletedForMe.forEach((deletion) => {
-          if (
-            deletion?.userId &&
-            deletion?.messageId &&
-            String(deletion.userId) === String(userId)
-          ) {
-            deletedForCurrentUser.add(String(deletion.messageId));
-          }
-        });
-      }
-
-      let joinedAtDate = null;
-      if (conversation.joinedAtByUser) {
-        const joinedEntry = typeof conversation.joinedAtByUser.get === "function"
-          ? conversation.joinedAtByUser.get(String(userId))
-          : conversation.joinedAtByUser[String(userId)];
-        if (joinedEntry) {
-          joinedAtDate = new Date(joinedEntry);
-        }
-      }
-
-      let lastMessage = null;
-      let lastMessageTimestamp = null;
-
-      for (let idx = conversation.messages.length - 1; idx >= 0; idx -= 1) {
-        const msg = conversation.messages[idx];
-        if (!msg) continue;
-
-        const msgIdStr = String(msg._id);
-        if (msg.isDeleteEvery === true) continue;
-        if (deletedForCurrentUser.has(msgIdStr)) continue;
-        if (joinedAtDate && new Date(msg.createdAt) < joinedAtDate) continue;
-
-        lastMessage = msg.content || (msg.mediaUrl ? "Media" : "Message");
-        lastMessageTimestamp = msg.createdAt;
-        break;
-      }
-
-      cleaned.lastMessage = lastMessage;
-      cleaned.lastMessageTimestamp = lastMessageTimestamp;
-    } else {
-      cleaned.unreadCount = 0;
-      cleaned.lastMessage = null;
-      cleaned.lastMessageTimestamp = null;
-    }
-  } else {
-    cleaned.unreadCount = 0;
-    cleaned.lastMessage = null;
-    cleaned.lastMessageTimestamp = null;
-  }
-
-  return successResponse(res, "Chat details fetched", cleaned, null, 200, 1);
-});
+export default { sendChatRequest };

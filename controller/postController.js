@@ -5,8 +5,6 @@ import { successResponse, errorResponse } from "../utils/response.js";
 import path from "path";
 import User from "../models/User.js";
 import { notifyUsers } from "../utils/notificationHelper.js";
-import { chatParticipantsCache } from "../config/socket.js";
-import ChatRequest from "../models/ChatRequest.js";
 
 /* -------------------------------------------------------------------------- */
 /* 🧩 COMMON POST RESPONSE FORMATTER                                           */
@@ -62,17 +60,44 @@ export const createPost = asyncHandler(async (req, res) => {
   const post = await Post.create({
     description,
     mediaType,
-    mediaUrl,
+    mediaUrl, // JSON field instead of file
     author: userId,
   });
+
+  console.log("Created Post:", post);
 
   const populatedPost = await Post.findById(post._id).populate(
     "author",
     "firstname lastname email country profileimg isAdmin"
   );
 
-  // ✅ Send response FIRST so client doesn't wait for notifications
-  successResponse(
+  try {
+    const subscribers = await User.find({
+      isSubscription: true,
+      isDeleted: false,
+      _id: { $ne: userId },
+    }).select("firstname lastname email fcmToken");
+
+    if (subscribers.length) {
+      const authorName =
+        `${user.firstname || ""} ${user.lastname || ""}`.trim() || user.email || "A creator";
+      const title = "New post available";
+      const message = `${authorName} just shared a new post.`;
+
+      await notifyUsers(subscribers, title, message, {
+        deeplink: `/posts/${post._id}`,
+        data: {
+          type: "post_new",
+          postId: post._id.toString(),
+          authorId: userId.toString(),
+        },
+      });
+    }
+  } catch (notifyError) {
+    console.error("Post notification error:", notifyError.message);
+  }
+
+  return successResponse(
     res,
     "Post created successfully",
     formatPostResponse(populatedPost),
@@ -80,42 +105,8 @@ export const createPost = asyncHandler(async (req, res) => {
     200,
     1
   );
-
-  // ✅ Send notifications in background (Fire and Forget)
-  setImmediate(async () => {
-    try {
-      // ✅ Get only subscribed users (excluding the post author)
-      const subscribers = await User.find({
-        isSubscription: true,
-        isDeleted: false,
-        _id: { $ne: userId },
-      }).select("_id firstname lastname email fcmToken");
-
-      if (subscribers.length > 0) {
-        const authorName =
-          `${user.firstname || ""} ${user.lastname || ""}`.trim() || user.email || "A creator";
-        const title = "New post available";
-        const message = `${authorName} just shared a new post.`;
-
-        // ✅ Use notifyUsers helper for bulk notifications
-        await notifyUsers(subscribers, title, message, {
-          deeplink: `/posts/${post._id}`,
-          data: {
-            type: "post_new",
-            postId: post._id.toString(),
-            authorId: userId.toString(),
-          },
-        });
-
-        console.log(`✅ Post notifications sent to ${subscribers.length} subscribed users`);
-      } else {
-        console.log("ℹ️ No subscribed users found to send post notifications");
-      }
-    } catch (notifyError) {
-      console.error("Post notification error:", notifyError.message);
-    }
-  });
 });
+
 
 /* -------------------------------------------------------------------------- */
 /* 📌 UPDATE POST                                                             */
@@ -205,92 +196,8 @@ export const deletePost = asyncHandler(async (req, res) => {
   return successResponse(res, "Post deleted successfully", null, null, 200, 1);
 });
 
-
 /* -------------------------------------------------------------------------- */
-/* 📌 GET MESSAGE FLAGS                                                       */
-/* -------------------------------------------------------------------------- */
-const getMessageFlags = async (req, postAuthorId, postId) => {
-  try {
-    // Check if user is authenticated
-    if (!req.user) {
-      // User is not logged in, so no message request flags
-      return {
-        messageRequestSent: false,
-        messageRequestAccepted: false,
-      };
-    }
-
-    const currentUserId = String(req.user._id || req.user.id);
-
-    // Validate current user ID
-    if (!currentUserId || currentUserId === "undefined" || !mongoose.Types.ObjectId.isValid(currentUserId)) {
-      console.warn("Invalid current user ID:", currentUserId);
-      return {
-        messageRequestSent: false,
-        messageRequestAccepted: false,
-      };
-    }
-
-    console.log("<<<>>>>", postAuthorId)
-
-    // Validate post author ID
-    if (!postAuthorId || String(postAuthorId) === "undefined" || !mongoose.Types.ObjectId.isValid(String(postAuthorId))) {
-      console.warn("Invalid post author ID:", postAuthorId);
-      return {
-        messageRequestSent: false,
-        messageRequestAccepted: false,
-      };
-    }
-
-    // If same user → do not show request flags
-    if (currentUserId === String(postAuthorId)) {
-      return {
-        messageRequestSent: false,
-        messageRequestAccepted: false,
-      };
-    }
-
-    // Check if there's an existing chat request between current user and post author
-    const chatRequest = await ChatRequest.findOne({
-      chatType: "individual",
-      $or: [
-        {
-          senderId: new mongoose.Types.ObjectId(currentUserId),
-          receiverId: new mongoose.Types.ObjectId(postAuthorId)
-        },
-        {
-          senderId: new mongoose.Types.ObjectId(postAuthorId),
-          receiverId: new mongoose.Types.ObjectId(currentUserId)
-        }
-      ]
-    });
-
-    if (!chatRequest) {
-      return {
-        messageRequestSent: false,
-        messageRequestAccepted: false,
-      };
-    }
-
-    // Check chat request status
-    const messageRequestSent = true; // Request exists
-    const messageRequestAccepted = chatRequest.status === "accepted";
-
-    return {
-      messageRequestSent,
-      messageRequestAccepted,
-    };
-  } catch (error) {
-    console.error("Error checking message flags:", error);
-    return {
-      messageRequestSent: false,
-      messageRequestAccepted: false,
-    };
-  }
-};
-
-/* -------------------------------------------------------------------------- */
-/* 📌 GET ALL                                                         */
+/* 📌 GET ALL POSTS                                                           */
 /* -------------------------------------------------------------------------- */
 export const getAllPosts = asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
@@ -298,104 +205,40 @@ export const getAllPosts = asyncHandler(async (req, res) => {
   const search = req.query.search ? req.query.search.trim() : "";
   const orderBy = req.query.orderBy || "createdAt";
   const order = req.query.order === "asc" ? 1 : -1;
-  const currentUserId = req.user?._id || req.user?.id; // Try both common patterns
+  const skip = (page - 1) * limit;
 
-  console.log("Current User ID from req.user:", currentUserId); // Debug log
+  // ✅ Only fetch posts that are NOT deleted
+  const query = { isDeleted: { $ne: true } };
 
-  // Get ALL posts from database
-  const allPosts = await Post.find({ isDeleted: { $ne: true } })
-    .populate("author", "firstname lastname email country profileimg isAdmin isDeleted");
-
-  console.log("Total posts found:", allPosts.length); // Debug log
-
-  // Count current user's posts
-  let currentUserPostCount = 0;
-  if (currentUserId) {
-    // Convert currentUserId to string for comparison
-    const currentUserIdStr = currentUserId.toString();
-    console.log("Looking for posts with author ID:", currentUserIdStr); // Debug log
-
-    // Filter and count posts where author is the current user
-    currentUserPostCount = allPosts.filter(post => {
-      if (!post.author || !post.author._id) return false;
-
-      const authorIdStr = post.author._id.toString();
-      console.log(`Post ${post._id} author ID: ${authorIdStr}`); // Debug log
-
-      return authorIdStr === currentUserIdStr;
-    }).length;
-
-    console.log("Current user post count:", currentUserPostCount); // Debug log
-  } else {
-    console.log("No currentUserId found in req.user"); // Debug log
+  // ✅ Add search support if needed
+  if (search) {
+    query.$or = [{ description: { $regex: search, $options: "i" } }];
   }
 
-  // Filter posts (your existing logic)
-  const filteredPosts = allPosts.filter((post) => {
-    if (!post.author || post.author.isDeleted) return false;
+  // ✅ Count total active (non-deleted) posts
+  const totalPosts = await Post.countDocuments(query);
 
-    if (search) {
-      const authorFullName = `${post.author.firstname} ${post.author.lastname}`.toLowerCase();
-      const authorEmail = post.author.email.toLowerCase();
-      const searchTerm = search.toLowerCase();
+  // ✅ Fetch posts and populate author info
+  const posts = await Post.find(query)
+    .populate("author", "firstname lastname email country profileimg isAdmin isDeleted")
+    .sort({ [orderBy]: order })
+    .skip(skip)
+    .limit(limit);
 
-      const postContentMatch = post.content?.toLowerCase().includes(searchTerm);
-      const authorNameMatch = authorFullName.includes(searchTerm);
-      const authorEmailMatch = authorEmail.includes(searchTerm);
-
-      return postContentMatch || authorNameMatch || authorEmailMatch;
-    }
-
-    return true;
-  });
-
-  const totalPosts = filteredPosts.length;
-  const start = (page - 1) * limit;
-  const end = start + limit;
-
-  const paginatedPosts = filteredPosts
-    .sort((a, b) => {
-      if (order === 1) return new Date(a[orderBy]) - new Date(b[orderBy]);
-      return new Date(b[orderBy]) - new Date(a[orderBy]);
-    })
-    .slice(start, end);
-
-  // 💥 Add flags for each post (async) - with validation
-  const postsWithFlags = await Promise.all(
-    paginatedPosts.map(async (post) => {
-      const formatted = formatPostResponse(post);
-
-      // Only check flags if author exists and has valid _id
-      let flags = {
-        messageRequestSent: false,
-        messageRequestAccepted: false
-      };
-
-      if (post.author && post.author._id && mongoose.Types.ObjectId.isValid(post.author._id)) {
-        flags = await getMessageFlags(req, post.author._id, post._id);
-      }
-
-      return { ...formatted, ...flags };
-    })
-  );
+  // ✅ Extra safety: filter out posts from deleted authors (optional)
+  const visiblePosts = posts.filter((post) => !post.author?.isDeleted);
 
   const pagination = {
     currentPage: page,
     totalPages: Math.ceil(totalPosts / limit),
     totalItems: totalPosts,
     itemsPerPage: limit,
-    hasNextPage: page < Math.ceil(totalPosts / limit),
-    hasPrevPage: page > 1,
   };
 
-  // Return response with current user's post count
   return successResponse(
     res,
     "Posts retrieved successfully",
-    {
-      posts: postsWithFlags,
-      currentUserPostCount // This should now show the correct count
-    },
+    formatPostsArray(visiblePosts),
     pagination,
     200,
     1
@@ -425,26 +268,7 @@ export const getPostById = asyncHandler(async (req, res) => {
     return successResponse(res, "User account has been deleted", null, null, 200, 0);
   }
 
-  const formatted = formatPostResponse(post);
-
-  // 💥 Add dynamic flags (async) - with validation
-  let flags = {
-    messageRequestSent: false,
-    messageRequestAccepted: false
-  };
-
-  if (post.author && post.author._id && mongoose.Types.ObjectId.isValid(post.author._id)) {
-    flags = await getMessageFlags(req, post.author._id, post._id);
-  }
-
-  return successResponse(
-    res,
-    "Post retrieved successfully",
-    { ...formatted, ...flags },
-    null,
-    200,
-    1
-  );
+  return successResponse(res, "Post retrieved successfully", formatPostResponse(post));
 });
 
 /* -------------------------------------------------------------------------- */

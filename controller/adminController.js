@@ -1,7 +1,7 @@
 import User from "../models/User.js";
 import redisClient from "../config/redis.js";
 import { asyncHandler } from "../utils/errorHandler.js";
-import { errorResponse, successResponse } from "../utils/response.js";
+import { successResponse } from "../utils/response.js";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import Post from "../models/Post.js";
@@ -32,7 +32,6 @@ export const getAllUsers = asyncHandler(async (req, res) => {
     page = 1,
     limit,
     search = "",
-    status = "all",
     orderBy = "createdAt",
     order = "desc",
   } = req.query;
@@ -40,44 +39,21 @@ export const getAllUsers = asyncHandler(async (req, res) => {
   page = parseInt(page);
   limit = limit ? parseInt(limit) : 0;
 
-  // Build the base query
-  let query = {};
-
-  // Add search condition if provided
-  if (search) {
-    query.$or = [
-      { firstname: { $regex: search, $options: "i" } },
-      { lastname: { $regex: search, $options: "i" } },
-      { email: { $regex: search, $options: "i" } },
-    ];
-  }
-
-  // Add status filter based on your user model fields
-  switch (status) {
-    case "active":
-      query.status = "active";
-      query.isDeleted = false;
-      break;
-
-    case "inactive":
-      query.status = "inactive";
-      query.isDeleted = false;
-      break;
-
-    case "deleted":
-      query.isDeleted = true;
-      break;
-
-    case "all":
-    default:
-      break;
-  }
+  const query = search
+    ? {
+        $or: [
+          { firstname: { $regex: search, $options: "i" } },
+          { lastname: { $regex: search, $options: "i" } },
+          { email: { $regex: search, $options: "i" } },
+        ],
+      }
+    : {};
 
   const sortOrder = order === "asc" ? 1 : -1;
   const sortOptions = { [orderBy]: sortOrder };
   const skip = (page - 1) * (limit || 0);
 
-  const cacheKey = `users:page=${page}&limit=${limit}&search=${search}&status=${status}&orderBy=${orderBy}&order=${order}`;
+  const cacheKey = `users:page=${page}&limit=${limit}&search=${search}&orderBy=${orderBy}&order=${order}`;
 
   let cachedData = null;
   try {
@@ -96,7 +72,7 @@ export const getAllUsers = asyncHandler(async (req, res) => {
 
   if (cachedData && lastUpdateTime) {
     const diff = Date.now() - parseInt(lastUpdateTime);
-    if (diff < 3000) {
+    if (diff < 3000) { 
       console.log("📦 Served users from Redis cache (fresh)");
       return successResponse(res, "Users retrieved successfully (from cache)", cachedData);
     }
@@ -112,13 +88,6 @@ export const getAllUsers = asyncHandler(async (req, res) => {
 
   const users = await usersQuery.exec();
 
-  // Format the response to include user status information
-  const formattedUsers = users.map(user => ({
-    ...user.toObject(),
-    // Ensure consistent status field in response
-    currentStatus: user.isDeleted ? 'deleted' : user.status
-  }));
-
   const pagination = {
     currentPage: page,
     totalPages: limit > 0 ? Math.ceil(totalUsers / limit) : 1,
@@ -126,14 +95,7 @@ export const getAllUsers = asyncHandler(async (req, res) => {
     itemsPerPage: limit || totalUsers,
   };
 
-  const responseData = {
-    users: formattedUsers,
-    pagination,
-    filters: {
-      appliedStatus: status,
-      search: search || null
-    }
-  };
+  const responseData = { users, pagination };
 
   // 🧠 4️⃣ Store fresh data and timestamp in Redis
   try {
@@ -148,6 +110,7 @@ export const getAllUsers = asyncHandler(async (req, res) => {
 
   return successResponse(res, "Users retrieved successfully", responseData);
 });
+
 
 // 📦 GET USER BY ID
 export const getUserById = asyncHandler(async (req, res) => {
@@ -185,7 +148,7 @@ export const getUserById = asyncHandler(async (req, res) => {
 // ➕ CREATE USER
 export const createUser = asyncHandler(async (req, res) => {
   const { firstname, lastname, email, password, isAdmin } = req.body;
-  if (!firstname || !email || !password)
+  if (!firstname || !lastname || !email || !password)
     return successResponse(res, "All fields are required", null, null, 200, 0);
 
   const existingUser = await User.findOne({ email });

@@ -18,7 +18,7 @@ const logSubscriptionLifecycle = async (eventType, stripeData, user = null, addi
   try {
     // ✅ IMPROVED: Extract ID from different data structures
     let dataId = 'Unknown ID';
-
+    
     if (stripeData) {
       if (stripeData.id) {
         dataId = stripeData.id;
@@ -123,20 +123,14 @@ export const selectPlan = async (req, res) => {
     // Ensure stripe customer exists
     let stripeCustomerId = user.stripeCustomerId;
     if (!stripeCustomerId) {
-      const customer = await stripe.customers.create({
-        email: user.email,
-        name: `${user.firstname} ${user.lastname}`,
-        metadata: {
-          userId: userId.toString(),
-        },
-      });
-      stripeCustomerId = customer.id;
+      stripeCustomerId = await createStripeCustomer(user);
       user.stripeCustomerId = stripeCustomerId;
       await user.save();
     }
 
     // Determine price ID
     let priceId = customPriceId;
+
     if (!priceId && planType) {
       const products = await stripe.products.list({ active: true, limit: 10 });
       let targetProduct = null;
@@ -174,7 +168,7 @@ export const selectPlan = async (req, res) => {
       return errorResponse(res, "Could not determine price ID", 400);
     }
 
-    // Validate price - CRITICAL: Check if it's a recurring price
+    // Validate price
     let priceDetails;
     try {
       priceDetails = await stripe.prices.retrieve(priceId, { expand: ["product"] });
@@ -182,132 +176,126 @@ export const selectPlan = async (req, res) => {
       return errorResponse(res, "Invalid price ID", 400);
     }
 
-    // ✅ CHECK: Make sure this is a RECURRING price for subscriptions
-    if (!priceDetails.recurring) {
-      return errorResponse(res, "This price is not configured for subscriptions. Please use a recurring price.", 400);
-    }
-
     const { planType: detectedPlanType } = describePlan(priceDetails, priceDetails.product);
 
-    console.log(`🔄 Creating subscription for customer: ${stripeCustomerId}, price: ${priceId}`);
-
-    // ✅ CRITICAL FIX: CREATE SUBSCRIPTION (not payment intent)
-    const subscription = await stripe.subscriptions.create({
-      customer: stripeCustomerId,
-      items: [
-        {
-          price: priceId, // This must be a recurring price
-        },
-      ],
-      payment_behavior: 'default_incomplete', // Allows subscription to be created with pending payment
-      payment_settings: {
-        save_default_payment_method: 'on_subscription',
-        payment_method_types: ['card'],
-      },
-      expand: ['latest_invoice.payment_intent'],
-      metadata: {
-        userId: user._id.toString(),
+    // Create Subscription Record (IN_PROGRESS status)
+    const subscriptionRecord = await Subscription.findOneAndUpdate(
+      { userId: user._id },
+      {
+        stripeCustomerId,
+        stripeSubscriptionId: `temp_${Date.now()}`,
+        priceId,
+        amount: priceDetails.unit_amount / 100,
+        currency: priceDetails.currency,
         planType: detectedPlanType,
-        userEmail: user.email
-      }
-    });
-
-    console.log(`✅ Subscription created: ${subscription.id}`);
-    console.log(`📊 Subscription status: ${subscription.status}`);
-    console.log(`💰 Payment Intent: ${subscription.latest_invoice.payment_intent.id}`);
-
-    // ✅ CREATE SUBSCRIPTION RECORD IN OUR DATABASE
-    const subscriptionRecord = await Subscription.create({
-      userId: user._id,
-      stripeCustomerId: stripeCustomerId,
-      stripeSubscriptionId: subscription.id, // This is the actual subscription ID
-      priceId: priceId,
-      amount: priceDetails.unit_amount / 100,
-      currency: priceDetails.currency,
-      planType: detectedPlanType,
-      status: subscription.status, // 'incomplete', 'active', etc.
-      startDate: new Date(subscription.current_period_start * 1000),
-      endDate: new Date(subscription.current_period_end * 1000),
-      currentPeriodStart: new Date(subscription.current_period_start * 1000),
-      currentPeriodEnd: new Date(subscription.current_period_end * 1000),
-      stripePaymentIntentId: subscription.latest_invoice.payment_intent.id
-    });
-
-    // ✅ CREATE EPHEMERAL KEY FOR FLUTTER
-    const ephemeralKey = await stripe.ephemeralKeys.create(
-      { customer: stripeCustomerId },
-      { apiVersion: '2023-10-16' }
+        status: "in_progress",
+        startDate: new Date(),
+      },
+      { upsert: true, new: true }
     );
 
-    await logSubscriptionLifecycle("SUBSCRIPTION_CREATED_PENDING_PAYMENT", {
-      subscriptionId: subscription.id,
-      priceId: priceId,
+    // ✅ FIX: Create BOTH Payment Intent AND Checkout Session
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: priceDetails.unit_amount, // amount in cents
+      currency: priceDetails.currency,
+      customer: stripeCustomerId,
+      automatic_payment_methods: {
+        enabled: true,
+      },
+      metadata: {
+        userId: user._id.toString(),
+        subscriptionRecordId: subscriptionRecord._id.toString(),
+        priceId: priceId.toString(),
+        planType: detectedPlanType.toString(),
+      },
+      description: `Subscription payment for ${detectedPlanType} plan`,
+    });
+
+    // Create Stripe Checkout Session
+    const sessionData = {
+      customer: stripeCustomerId,
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      mode: "subscription",
+      success_url: `${process.env.FRONTEND_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/payment-cancel`,
+      client_reference_id: subscriptionRecord._id.toString(),
+
+      metadata: {
+        userId: user._id.toString(),
+        planType: detectedPlanType.toString(),
+        subscriptionRecordId: subscriptionRecord._id.toString(),
+      },
+
+      subscription_data: {
+        metadata: {
+          userId: user._id.toString(),
+          planType: detectedPlanType.toString(),
+          subscriptionRecordId: subscriptionRecord._id.toString(),
+        },
+      },
+      
+      payment_method_types: ['card'],
+    };
+
+    // Only enable automatic tax in production mode
+    if (process.env.NODE_ENV === 'production') {
+      sessionData.automatic_tax = { enabled: true };
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionData);
+
+    await logSubscriptionLifecycle("PLAN_SELECTED", { 
+      priceId, 
       planType: detectedPlanType,
-      paymentIntentId: subscription.latest_invoice.payment_intent.id,
-      status: subscription.status
-    }, user);
+      paymentIntentId: paymentIntent.id,
+      sessionId: session.id 
+    }, user, {
+      apiSource: "selectPlan",
+      checkoutSessionId: session.id,
+      paymentIntentId: paymentIntent.id,
+      subscriptionRecordId: subscriptionRecord._id.toString(),
+    });
 
-    // ✅ RETURN RESPONSE WITH SUBSCRIPTION DATA
-    return successResponse(res, "Subscription created. Complete payment to activate.", {
-      // For Flutter Stripe SDK
-      paymentIntentClientSecret: subscription.latest_invoice.payment_intent.client_secret,
-      paymentIntentId: subscription.latest_invoice.payment_intent.id,
-
-      // For Flutter PaymentSheet
+    // ✅ FIX: Return BOTH Payment Intent AND Checkout Session
+    return successResponse(res, "Plan selected successfully. Use checkout URL to complete subscription.", {
+      // Payment Intent details (for Flutter/React Native)
+      paymentIntentId: paymentIntent.id,
+      clientSecret: paymentIntent.client_secret,
+      
+      // Checkout Session details (for Web)
+      checkoutUrl: session.url,
+      sessionId: session.id,
+      
+      // Common details
       customerId: stripeCustomerId,
-      customerEphemeralKeySecret: ephemeralKey.secret,
-
-      // Subscription details (NEW - so frontend knows about the subscription)
+      requiresPayment: true,
       subscription: {
         id: subscriptionRecord._id,
-        stripeSubscriptionId: subscription.id, // The actual Stripe subscription ID
-        status: subscription.status,
+        status: "in_progress",
         planType: detectedPlanType,
         amount: priceDetails.unit_amount / 100,
         currency: priceDetails.currency,
-        currentPeriodStart: new Date(subscription.current_period_start * 1000),
-        currentPeriodEnd: new Date(subscription.current_period_end * 1000),
       },
-
-      requiresPayment: true,
     });
-
   } catch (error) {
     console.error("❌ selectPlan error:", error);
 
-    // Get user for logging
-    let userForLog = null;
-    try {
-      const userId = req.user?.id || req.user?._id;
-      if (userId) {
-        userForLog = await User.findById(userId);
-      }
-    } catch (logError) {
-      console.warn("⚠️ Could not fetch user for logging:", logError.message);
-    }
-
     await logSubscriptionLifecycle(
-      "SUBSCRIPTION_CREATION_FAILED",
-      { 
-        error: error.message, 
-        code: error.code,
-        type: error.type 
-      },
-      userForLog,
+      "PLAN_SELECTION_FAILED",
+      { error: error.message },
+      null,
       {
         apiSource: "selectPlan",
         stack: error.stack,
       }
     );
-    
-    // Better error messages for common Stripe errors
-    if (error.code === 'price_invalid') {
-      return errorResponse(res, "Invalid price configuration. Please contact support.", 400);
-    } else if (error.type === 'StripeInvalidRequestError') {
-      return errorResponse(res, "Stripe configuration error: " + error.message, 400);
-    }
-    
-    return errorResponse(res, "Error creating subscription: " + error.message, 500);
+
+    return errorResponse(res, "Error selecting plan: " + error.message, 500);
   }
 };
 
@@ -333,20 +321,6 @@ export const getPlans = async (req, res) => {
   }
 };
 
-const getNextRenewalNumber = async (userId, subscriptionId) => {
-  try {
-    const previousRenewals = await Subscription.countDocuments({
-      userId: userId,
-      originalSubscriptionId: subscriptionId,
-      isRenewalEntry: true
-    });
-    return previousRenewals + 1;
-  } catch (error) {
-    console.error("Error counting renewals:", error);
-    return 1;
-  }
-};
-
 /**
  * @desc Stripe Webhook with Complete Subscription Management
  * @route POST /api/subscription/webhook
@@ -357,11 +331,11 @@ export const stripeWebhook = async (req, res) => {
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let event;
 
-  console.log("🔔 Webhook received, raw body type:", typeof req.body);
-  console.log("🔔 Raw body is Buffer:", Buffer.isBuffer(req.body));
-
-  // ✅ Use the raw body directly (it's already a Buffer from middleware)
-  const rawBody = req.body.toString('utf8');
+  // 🚨 CRITICAL: Use raw body for webhook verification
+  let rawBody = req.rawBody;
+  if (!rawBody && req.body) {
+    rawBody = JSON.stringify(req.body);
+  }
 
   if (!rawBody) {
     console.error("❌ No raw body available for webhook verification");
@@ -370,22 +344,26 @@ export const stripeWebhook = async (req, res) => {
 
   // ✅ Verify signature
   try {
-    if (process.env.NODE_ENV !== "production") {
-      event = JSON.parse(rawBody);
-      console.log("⚠️ Webhook signature verification skipped (development mode)");
+    if (process.env.STRIPE_WEBHOOK_UNSAFE_TESTING === "true" && process.env.NODE_ENV !== "production") {
+      event = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
+      console.log("⚠️ Webhook signature verification skipped (test mode)");
     } else {
-      // Production verification...
+      if (!webhookSecret) {
+        console.error("❌ Missing webhook secret");
+        return res.status(500).send("Missing webhook secret");
+      }
+      if (!sig) {
+        console.error("❌ No stripe-signature header provided");
+        return res.status(400).send("Webhook Error: No stripe-signature header provided");
+      }
+
+      event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+      console.log("✅ Webhook signature verified successfully");
     }
-
-    console.log(`🔔 Processing event: ${event.type}`);
-
-    // ✅ Rest of your webhook code...
-
   } catch (err) {
-    console.error("❌ Webhook processing error:", err);
+    console.error("❌ Webhook signature failed:", err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-
 
   // ✅ Handle Stripe Events with Complete Subscription Management
   try {
@@ -400,66 +378,69 @@ export const stripeWebhook = async (req, res) => {
     }
 
     switch (event.type) {
-      case "customer.subscription.created": {
-        try {
-          const sub = eventData;
-          console.log(`🎉 New subscription created: ${sub.id}`);
-
+      case "checkout.session.completed": {
+        const session = eventData;
+        console.log(`✅ Checkout session completed: ${session.id}`);
+        
+        if (session.mode === "subscription" && session.subscription) {
+          // Retrieve the subscription to get full details
+          const subscription = await stripe.subscriptions.retrieve(session.subscription);
+          
           await logSubscriptionLifecycle(
-            'SUBSCRIPTION_CREATED',
-            sub,
+            'CHECKOUT_COMPLETED',
+            session,
             user,
             {
               webhookEvent: event.type,
-              status: sub.status
+              subscriptionId: subscription.id,
+              status: subscription.status
             }
           );
+          
+          console.log(`🔄 Checkout completed for subscription: ${subscription.id}`);
+        }
+        break;
+      }
 
-          if (user) {
-            const price = sub.items?.data?.[0]?.price;
-            const { planType } = describePlan(price);
+      case "customer.subscription.created": {
+        const sub = eventData;
+        console.log(`🎉 New subscription created: ${sub.id}`);
 
-            // ✅ PREVENT DUPLICATE RECORDS
-            const existingRecord = await Subscription.findOne({
-              stripeSubscriptionId: sub.id
-            });
+        // ✅ SINGLE LOG ENTRY
+        await logSubscriptionLifecycle(
+          'SUBSCRIPTION_CREATED',
+          sub,
+          user,
+          {
+            webhookEvent: event.type,
+            status: sub.status
+          }
+        );
 
-            if (existingRecord) {
-              console.log(`ℹ️ Subscription ${sub.id} already exists, skipping creation`);
-              break;
-            }
+        if (user) {
+          const price = sub.items?.data?.[0]?.price;
+          const { planType } = describePlan(price);
 
-            // ✅ CHECK IF THIS IS RENEWAL OR NEW SUBSCRIPTION
-            const existingActiveSub = await Subscription.findOne({
-              userId: user._id,
-              status: "active"
-            });
-
-            const isRenewal = !!existingActiveSub;
-
-            // ✅ CREATE SUBSCRIPTION RECORD (ONLY HERE)
-            await Subscription.create({
-              userId: user._id,
+          // ✅ UPDATE SUBSCRIPTION RECORD
+          await Subscription.findOneAndUpdate(
+            { userId: user._id },
+            {
               stripeCustomerId: sub.customer,
               stripeSubscriptionId: sub.id,
               priceId: price?.id,
               amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
               currency: price?.currency,
               planType,
-              status: sub.status, // This might be "active", "trialing", etc.
+              status: sub.status,
               startDate: new Date(sub.current_period_start * 1000),
               endDate: new Date(sub.current_period_end * 1000),
               currentPeriodStart: new Date(sub.current_period_start * 1000),
               currentPeriodEnd: new Date(sub.current_period_end * 1000),
-              isRenewalEntry: isRenewal,
-              originalSubscriptionId: isRenewal ? existingActiveSub.stripeSubscriptionId : null
-            });
+            },
+            { upsert: true, new: true }
+          );
 
-            console.log(`✅ ${isRenewal ? 'Renewal' : 'New'} subscription created for user: ${user.email}`);
-          }
-        } catch (error) {
-          console.error(`❌ Error in ${event.type}:`, error);
-          await logSubscriptionLifecycle('WEBHOOK_CASE_ERROR', { error: error.message }, user);
+          console.log(`✅ Subscription record updated for user: ${user.email}`);
         }
         break;
       }
@@ -468,6 +449,7 @@ export const stripeWebhook = async (req, res) => {
         const sub = eventData;
         console.log(`📝 Subscription updated: ${sub.id}, Status: ${sub.status}`);
 
+        // ✅ SINGLE LOG ENTRY
         await logSubscriptionLifecycle(
           'SUBSCRIPTION_UPDATED',
           sub,
@@ -484,55 +466,39 @@ export const stripeWebhook = async (req, res) => {
           const price = sub.items?.data?.[0]?.price;
           const { planType } = describePlan(price);
 
-          // ✅ FIND THE CORRECT SUBSCRIPTION RECORD
-          const subscriptionRecord = await Subscription.findOne({
-            stripeSubscriptionId: sub.id
-          });
+          const updateData = {
+            status: sub.status,
+            startDate: new Date(sub.current_period_start * 1000),
+            endDate: new Date(sub.current_period_end * 1000),
+            currentPeriodStart: new Date(sub.current_period_start * 1000),
+            currentPeriodEnd: new Date(sub.current_period_end * 1000),
+            cancelAtPeriodEnd: sub.cancel_at_period_end || false,
+          };
 
-          if (subscriptionRecord) {
-            const updateData = {
-              status: sub.status,
-              startDate: new Date(sub.current_period_start * 1000),
-              endDate: new Date(sub.current_period_end * 1000),
-              currentPeriodStart: new Date(sub.current_period_start * 1000),
-              currentPeriodEnd: new Date(sub.current_period_end * 1000),
-              cancelAtPeriodEnd: sub.cancel_at_period_end || false,
-            };
-
-            // ✅ HANDLE CANCELLATION/EXPIRY
-            if (sub.status === "canceled" || sub.status === "expired") {
-              updateData.isSubscriptionCancelled = true;
-              updateData.canceledAt = new Date();
-
-              // ✅ SET USER SUBSCRIPTION TO FALSE WHEN ACTUALLY ENDED
-              user.isSubscription = false;
-              user.isSubscriptionCancelled = true;
-              user.subscriptionCanceledAt = new Date();
-            } else if (sub.cancel_at_period_end) {
-              updateData.status = "cancel_scheduled";
-              updateData.canceledAt = new Date();
-              // ✅ SERVICE CONTINUES UNTIL PERIOD END
-              user.isSubscription = true;
-              user.isSubscriptionCancelled = true;
-            } else {
-              // ✅ ACTIVE SUBSCRIPTION
-              user.isSubscription = true;
-              user.isSubscriptionCancelled = false;
-            }
-
-            // Update subscription type if available
-            if (planType !== "unknown") {
-              user.subscriptionType = planType;
-            }
-
-            user.subscriptionStartDate = new Date(sub.current_period_start * 1000);
-            user.subscriptionEndDate = new Date(sub.current_period_end * 1000);
-
-            await subscriptionRecord.updateOne(updateData);
-            await user.save();
-
-            console.log(`✅ Subscription updated: ${sub.id}, Status: ${sub.status}`);
+          if (sub.cancel_at_period_end) {
+            updateData.status = "cancel_scheduled";
+            updateData.canceledAt = new Date();
           }
+
+          // ✅ UPDATE SUBSCRIPTION RECORD
+          await Subscription.findOneAndUpdate(
+            { userId: user._id },
+            updateData,
+            { upsert: false }
+          );
+
+          // ✅ UPDATE USER SUBSCRIPTION STATUS
+          if (planType !== "unknown") {
+            user.subscriptionType = planType;
+          }
+
+          user.subscriptionStartDate = new Date(sub.current_period_start * 1000);
+          user.subscriptionEndDate = new Date(sub.current_period_end * 1000);
+          user.isSubscription = sub.status === "active" || sub.status === "trialing";
+
+          await user.save();
+          
+          console.log(`✅ User subscription updated: ${user.email}, Status: ${user.isSubscription}, Type: ${user.subscriptionType}`);
         }
         break;
       }
@@ -541,141 +507,81 @@ export const stripeWebhook = async (req, res) => {
         const invoice = eventData;
         const subscriptionId = invoice.subscription;
 
-        console.log(`💰 INVOICE PAYMENT SUCCEEDED:`, {
-          invoiceId: invoice.id,
-          subscriptionId: subscriptionId,
-          billingReason: invoice.billing_reason,
-          paid: invoice.paid,
-          amountPaid: invoice.amount_paid
-        });
-
         if (subscriptionId && invoice.paid === true) {
           try {
-            const stripeSub = await stripe.subscriptions.retrieve(subscriptionId, {
-              expand: ['items.data.price']
-            });
+            const stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
 
-            let targetUser = await User.findOne({ stripeCustomerId: stripeSub.customer });
-            if (!targetUser && stripeSub.metadata?.userId) {
-              targetUser = await User.findById(stripeSub.metadata.userId);
-            }
+            // ✅ SINGLE LOG ENTRY
+            await logSubscriptionLifecycle(
+              'PAYMENT_SUCCEEDED',
+              stripeSub,
+              user,
+              {
+                webhookEvent: event.type,
+                invoiceId: invoice.id,
+                amountPaid: invoice.amount_paid,
+                billingReason: invoice.billing_reason
+              }
+            );
 
-            if (!targetUser) {
-              console.log(`❌ User not found for subscription: ${subscriptionId}`);
-              break;
-            }
+            if (user) {
+              const price = stripeSub.items?.data?.[0]?.price;
+              const { planType } = describePlan(price);
 
-            const price = stripeSub.items?.data?.[0]?.price;
-            const { planType } = describePlan(price);
-
-            // ✅ IMPROVED RENEWAL DETECTION
-            const isRenewal = invoice.billing_reason === "subscription_cycle" ||
-              invoice.billing_reason === "subscription_update" ||
-              (invoice.billing_reason === "subscription_create" &&
-                await Subscription.exists({ userId: targetUser._id, status: "active" }));
-
-            console.log(`🔄 Payment Type: ${isRenewal ? 'RENEWAL' : 'INITIAL'}`);
-
-            if (isRenewal) {
-              // ✅ RENEWAL - CREATE NEW SUBSCRIPTION ENTRY
-              console.log(`🔄 Subscription Renewed: ${stripeSub.id}`);
-
-              await Subscription.create({
-                userId: targetUser._id,
-                stripeCustomerId: stripeSub.customer,
-                stripeSubscriptionId: stripeSub.id,
-                priceId: price?.id,
-                amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
-                currency: price?.currency,
-                planType: planType,
-                status: "active",
-                startDate: new Date(stripeSub.current_period_start * 1000),
-                endDate: new Date(stripeSub.current_period_end * 1000),
-                currentPeriodStart: new Date(stripeSub.current_period_start * 1000),
-                currentPeriodEnd: new Date(stripeSub.current_period_end * 1000),
-                isRenewalEntry: true,
-                latestInvoiceId: invoice.id,
-              });
-
-              // Update User with new period
-              targetUser.subscriptionStartDate = new Date(stripeSub.current_period_start * 1000);
-              targetUser.subscriptionEndDate = new Date(stripeSub.current_period_end * 1000);
-              targetUser.lastSubscriptionDate = new Date();
-              targetUser.isSubscription = true;
-              targetUser.subscriptionType = planType;
-              await targetUser.save();
-
-              console.log(`✅ Renewal processed for: ${targetUser.email}`);
-
-            } else {
-              // ✅ INITIAL PAYMENT - ACTIVATE FIRST SUBSCRIPTION
-              console.log(`✅ Initial subscription activated: ${stripeSub.id}`);
-
+              // ✅ UPDATE SUBSCRIPTION RECORD
               await Subscription.findOneAndUpdate(
+                { userId: user._id },
                 {
-                  userId: targetUser._id,
-                  stripeSubscriptionId: stripeSub.id
-                },
-                {
+                  stripeCustomerId: stripeSub.customer,
+                  stripeSubscriptionId: stripeSub.id,
+                  priceId: price?.id,
+                  amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
+                  currency: price?.currency,
+                  planType,
                   status: "active",
-                  planType: planType,
                   startDate: new Date(stripeSub.current_period_start * 1000),
                   endDate: new Date(stripeSub.current_period_end * 1000),
                   currentPeriodStart: new Date(stripeSub.current_period_start * 1000),
                   currentPeriodEnd: new Date(stripeSub.current_period_end * 1000),
                   latestInvoiceId: invoice.id,
-                  activatedAt: new Date(),
                 },
                 { upsert: true }
               );
 
-              // Update User
-              targetUser.isSubscription = true;
-              targetUser.subscriptionType = planType;
-              targetUser.subscriptionStartDate = new Date(stripeSub.current_period_start * 1000);
-              targetUser.subscriptionEndDate = new Date(stripeSub.current_period_end * 1000);
-              targetUser.subscriptionActivatedAt = new Date();
-              await targetUser.save();
+              // ✅ ACTIVATE USER SUBSCRIPTION
+              user.isSubscription = true;
+              user.subscriptionType = planType;
+              user.subscriptionStartDate = new Date(stripeSub.current_period_start * 1000);
+              user.subscriptionEndDate = new Date(stripeSub.current_period_end * 1000);
+              user.subscriptionActivatedAt = new Date();
 
-              console.log(`✅ User activated via webhook: ${targetUser.email}`);
+              await user.save();
+
+              console.log(`✅ USER ACTIVATED via webhook: ${user.email}, isSubscription=${user.isSubscription}, type=${user.subscriptionType}`);
+
+              // ✅ Send notification
+              await notifyUser(
+                user,
+                "Subscription activated",
+                `Your ${planType} subscription is now active. Enjoy premium features until ${toISODate(stripeSub.current_period_end)}.`,
+                {
+                  deeplink: "",
+                  data: {
+                    action: "subscription_activated",
+                    subscriptionId: stripeSub.id,
+                    currentPeriodEnd: toISODateTime(stripeSub.current_period_end),
+                    planType: planType
+                  },
+                }
+              );
             }
-
-            // ✅ SEND NOTIFICATION
-            await notifyUser(
-              targetUser,
-              isRenewal ? "Subscription Renewed 🔄" : "Subscription Activated 🎉",
-              isRenewal
-                ? `Your ${planType} subscription has been renewed. Next billing: ${toISODate(stripeSub.current_period_end)}`
-                : `Your ${planType} subscription is now active. Enjoy premium features until ${toISODate(stripeSub.current_period_end)}.`,
-              {
-                deeplink: "/subscription",
-                data: {
-                  action: isRenewal ? "subscription_renewed" : "subscription_activated",
-                  subscriptionId: stripeSub.id,
-                  planType: planType
-                },
-              }
-            );
-
-            // ✅ LOG SUCCESS
-            await logSubscriptionLifecycle(
-              isRenewal ? 'SUBSCRIPTION_RENEWED' : 'SUBSCRIPTION_ACTIVATED',
-              stripeSub,
-              targetUser,
-              {
-                webhookEvent: event.type,
-                billingReason: invoice.billing_reason,
-                invoiceId: invoice.id,
-                isRenewal: isRenewal
-              }
-            );
-
           } catch (error) {
             console.error("❌ ERROR in invoice.payment_succeeded:", error);
+            // ✅ Log the error
             await logSubscriptionLifecycle(
               'WEBHOOK_PROCESSING_ERROR',
               { error: error.message, subscriptionId },
-              null,
+              user,
               {
                 webhookEvent: event.type,
                 stack: error.stack
@@ -702,27 +608,21 @@ export const stripeWebhook = async (req, res) => {
         );
 
         if (user) {
-          // ✅ UPDATE SUBSCRIPTION RECORD
           await Subscription.findOneAndUpdate(
             { userId: user._id },
             {
               status: "canceled",
-              isSubscriptionCancelled: true, // ✅ KEEP CANCELLATION FLAG
               canceledAt: new Date(),
               endDate: new Date(sub.current_period_end * 1000),
-              currentPeriodEnd: new Date(sub.current_period_end * 1000),
             }
           );
 
-          // ✅ NOW SET isSubscription: false BECAUSE SERVICE ACTUALLY ENDED
-          user.isSubscription = false; // ✅ SERVICE ENDED
-          user.isSubscriptionCancelled = true; // ✅ KEEP CANCELLATION FLAG
+          user.isSubscription = false;
           user.subscriptionType = null;
-          user.subscriptionCanceledAt = new Date(); // ✅ KEEP CANCELLATION DATE
-          user.subscriptionEndDate = new Date(sub.current_period_end * 1000); // ✅ ACTUAL END DATE
+          user.subscriptionEndDate = null;
           await user.save();
-
-          console.log(`✅ User subscription fully ended: ${user.email}`);
+          
+          console.log(`✅ User subscription canceled: ${user.email}`);
         }
         break;
       }
@@ -747,7 +647,7 @@ export const stripeWebhook = async (req, res) => {
           // Optionally set user to not subscribed if payment fails
           // user.isSubscription = false;
           // await user.save();
-
+          
           console.log(`⚠️ Payment failed for user: ${user.email}`);
         }
         break;
@@ -766,7 +666,7 @@ export const stripeWebhook = async (req, res) => {
 };
 
 /**
- * @desc Cancel active subscription - ONLY SET FLAG & DATE, KEEP SERVICE ACTIVE
+ * @desc Cancel active subscription
  * @route DELETE /api/subscription/cancel
  * @access Private (User)
  */
@@ -797,8 +697,6 @@ export const cancelSubscription = asyncHandler(async (req, res) => {
         cancelAtPeriodEnd: true,
         currentPeriodEnd: new Date(sub.current_period_end * 1000),
         status: sub.status,
-        isSubscriptionCancelled: true,
-        isSubscription: true // ✅ SERVICE STILL ACTIVE
       });
     }
 
@@ -806,27 +704,6 @@ export const cancelSubscription = asyncHandler(async (req, res) => {
     const canceled = await stripe.subscriptions.update(sub.id, {
       cancel_at_period_end: true,
     });
-
-    // ✅ ONLY SET CANCELLATION FLAG & DATE, KEEP isSubscription: true
-    const currentDate = new Date();
-
-    // Update user - ONLY SET CANCELLATION FLAGS, KEEP isSubscription: true
-    user.isSubscriptionCancelled = true; // ✅ SET CANCELLATION FLAG
-    user.subscriptionCanceledAt = currentDate; // ✅ SET CANCELLATION DATE
-    // ❌ DON'T CHANGE: user.isSubscription = true (service continues)
-    await user.save();
-
-    // ✅ UPDATE SUBSCRIPTION RECORD
-    await Subscription.findOneAndUpdate(
-      { stripeSubscriptionId: sub.id },
-      {
-        status: "cancel_scheduled", // Status change but service continues
-        isSubscriptionCancelled: true, // ✅ SET CANCELLATION FLAG
-        canceledAt: currentDate, // ✅ SET CANCELLATION DATE
-        cancelAtPeriodEnd: true,
-        currentPeriodEnd: new Date(canceled.current_period_end * 1000),
-      }
-    );
 
     // ✅ SINGLE LOG ENTRY
     await logSubscriptionLifecycle(
@@ -836,29 +713,15 @@ export const cancelSubscription = asyncHandler(async (req, res) => {
       {
         apiSource: 'cancelSubscription',
         cancelAtPeriodEnd: canceled.cancel_at_period_end,
-        currentPeriodEnd: new Date(canceled.current_period_end * 1000),
-        userUpdated: {
-          isSubscription: true, // ✅ SERVICE CONTINUES
-          isSubscriptionCancelled: true, // ✅ CANCELLATION REQUESTED
-          subscriptionCanceledAt: currentDate
-        }
+        currentPeriodEnd: new Date(canceled.current_period_end * 1000)
       }
     );
 
-    return successResponse(res, "Subscription cancellation scheduled successfully. You can continue using the service until the end of your billing period.", {
+    return successResponse(res, "Subscription cancellation requested successfully", {
       subscriptionId: canceled.id,
       cancelAtPeriodEnd: canceled.cancel_at_period_end,
       currentPeriodEnd: new Date(canceled.current_period_end * 1000),
       status: canceled.status,
-      isSubscriptionCancelled: true, // ✅ CANCELLATION REQUESTED
-      isSubscription: true, // ✅ SERVICE STILL ACTIVE
-      userStatus: {
-        isSubscription: true, // ✅ SERVICE CONTINUES
-        isSubscriptionCancelled: true, // ✅ CANCELLATION REQUESTED
-        subscriptionCanceledAt: currentDate,
-        subscriptionEndDate: user.subscriptionEndDate, // Actual service end date
-        daysRemaining: Math.ceil((new Date(canceled.current_period_end * 1000) - currentDate) / (1000 * 60 * 60 * 24))
-      }
     });
   } catch (error) {
     console.error("❌ cancelSubscription error:", error);
@@ -867,7 +730,7 @@ export const cancelSubscription = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Get all subscriptions with Stripe details (admin only) - SIMPLIFIED
+ * @desc Get all subscriptions with Stripe details (admin only) - OPTIMIZED
  * @route GET /api/subscription/admin/list
  */
 export const getAllSubscriptionsAdmin = async (req, res) => {
@@ -877,12 +740,15 @@ export const getAllSubscriptionsAdmin = async (req, res) => {
 
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.max(parseInt(req.query.perPage, 10) || 10, 1);
+    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
     const search = req.query.search ? req.query.search.trim() : "";
-    const order = req.query.sort === "asc" ? 1 : -1;
+    const status = req.query.status || "";
+    const planType = req.query.planType || "";
+    const orderBy = req.query.orderBy || "createdAt";
+    const order = req.query.order === "asc" ? 1 : -1;
     const skip = (page - 1) * limit;
 
-    console.log(`📊 Admin subscriptions request: page=${page}, perPage=${limit}, search="${search}", sort="${req.query.sort}"`);
+    console.log(`📊 Admin subscriptions request: page=${page}, limit=${limit}, search="${search}", status="${status}", planType="${planType}"`);
 
     // Build optimized query pipeline
     const pipeline = [
@@ -902,48 +768,67 @@ export const getAllSubscriptionsAdmin = async (req, res) => {
       },
     ];
 
-    // ✅ Add search filter
+    // ✅ OPTIMIZED: Add search filters
+    const matchConditions = [];
+
     if (search) {
       const regex = new RegExp(search, "i");
-      pipeline.push({
-        $match: {
-          $or: [
-            { stripeSubscriptionId: regex },
-            { stripeCustomerId: regex },
-            { planType: regex },
-            { status: regex },
-            { "user.firstname": regex },
-            { "user.lastname": regex },
-            { "user.email": regex },
-          ],
-        }
+      matchConditions.push({
+        $or: [
+          { stripeSubscriptionId: regex },
+          { stripeCustomerId: regex },
+          { planType: regex },
+          { status: regex },
+          { "user.firstname": regex },
+          { "user.lastname": regex },
+          { "user.email": regex },
+          { "user.phoneNumber": regex },
+        ],
       });
     }
 
-    // ✅ Get total count first (for pagination)
+    // ✅ OPTIMIZED: Add status filter
+    if (status) {
+      matchConditions.push({ status: new RegExp(status, "i") });
+    }
+
+    // ✅ OPTIMIZED: Add planType filter
+    if (planType) {
+      matchConditions.push({ planType: new RegExp(planType, "i") });
+    }
+
+    if (matchConditions.length > 0) {
+      pipeline.push({
+        $match: matchConditions.length === 1 ? matchConditions[0] : { $and: matchConditions }
+      });
+    }
+
+    // ✅ OPTIMIZED: Get total count first (for pagination)
     const countPipeline = [...pipeline, { $count: "total" }];
     const countResult = await Subscription.aggregate(countPipeline);
     const total = countResult[0]?.total || 0;
 
-    // ✅ Get paginated data with sorting
+    // ✅ OPTIMIZED: Get paginated data
     pipeline.push(
-      { $sort: { createdAt: order } }, // Always sort by createdAt
+      { $sort: { [orderBy]: order } },
       { $skip: skip },
       { $limit: limit }
     );
 
     const subscriptions = await Subscription.aggregate(pipeline);
 
-    // ✅ Batch process Stripe data
+    // ✅ OPTIMIZED: Batch process Stripe data for better performance
     const optimizedSubscriptions = await Promise.all(
       subscriptions.map(async (sub) => {
         const user = sub.user || null;
 
+        // ✅ OPTIMIZED: Only fetch Stripe data if subscription ID exists
         if (!sub.stripeSubscriptionId) {
           return formatSubscriptionResponse(sub, user, null, null, null, null);
         }
 
         try {
+          // ✅ OPTIMIZED: Fetch subscription with minimal expands for list view
           const stripeSub = await stripe.subscriptions.retrieve(sub.stripeSubscriptionId, {
             expand: ["latest_invoice", "default_payment_method"]
           });
@@ -954,10 +839,11 @@ export const getAllSubscriptionsAdmin = async (req, res) => {
             stripeSub,
             stripeSub.latest_invoice,
             stripeSub.default_payment_method,
-            null
+            null // Skip price expansion for list view
           );
         } catch (err) {
           console.warn(`⚠️ Stripe fetch failed for ${sub.stripeSubscriptionId}: ${err.message}`);
+          // Return basic data if Stripe fetch fails
           return formatSubscriptionResponse(sub, user, null, null, null, null);
         }
       })
@@ -967,7 +853,7 @@ export const getAllSubscriptionsAdmin = async (req, res) => {
 
     return successResponse(
       res,
-      "All subscriptions fetched successfully",
+      "All subscriptions fetched",
       {
         subscriptions: optimizedSubscriptions,
         pagination: {
@@ -975,9 +861,7 @@ export const getAllSubscriptionsAdmin = async (req, res) => {
           perPage: limit,
           totalPages: Math.ceil(total / limit),
           totalData: total,
-          hasMore: page * limit < total,
-          hasPrevPage: page > 1,
-          hasNextPage: page < Math.ceil(total / limit)
+          hasMore: page * limit < total
         }
       }
     );
@@ -988,7 +872,7 @@ export const getAllSubscriptionsAdmin = async (req, res) => {
 };
 
 /**
- * @desc Get subscription by ID with all details + SIMPLE transaction history
+ * @desc Get subscription by ID with all details (Admin)
  * @route GET /api/subscription/admin/:subscriptionId
  * @access Private (Admin)
  */
@@ -1020,37 +904,12 @@ export const getSubscriptionById = asyncHandler(async (req, res) => {
       ? await User.findById(dbSubscription.userId)
       : await User.findOne({ stripeCustomerId: stripeSubscription.customer });
 
-    // ✅ SIMPLE: Get only SUCCESSFUL transactions
-    let simpleTransactions = [];
-    if (user?.stripeCustomerId) {
-      const invoices = await stripe.invoices.list({
-        customer: user.stripeCustomerId,
-        subscription: subscriptionId, // Only invoices for this subscription
-        limit: 50,
-        status: 'paid', // ✅ ONLY PAID INVOICES
-      });
-
-      simpleTransactions = invoices.data.map(invoice => ({
-        id: invoice.id,
-        number: invoice.number,
-        amount: invoice.amount_paid / 100, // Convert to dollars
-        currency: invoice.currency.toUpperCase(),
-        date: new Date(invoice.created * 1000).toISOString().split('T')[0], // Only date
-        type: invoice.billing_reason === "subscription_cycle" ? "renewal" : "initial",
-        receipt_url: invoice.hosted_invoice_url,
-        status: 'completed'
-      }));
-
-      // Sort by date (newest first)
-      simpleTransactions.sort((a, b) => new Date(b.date) - new Date(a.date));
-    }
-
     // Extract data
     const latestInvoice = stripeSubscription.latest_invoice;
     const paymentMethod = stripeSubscription.default_payment_method;
     const price = stripeSubscription.items.data[0]?.price;
 
-    // Format response using your existing formatter
+    // Format response
     const subscription = formatSubscriptionResponse(
       dbSubscription || { stripeSubscriptionId: subscriptionId },
       user,
@@ -1060,23 +919,22 @@ export const getSubscriptionById = asyncHandler(async (req, res) => {
       price
     );
 
-    return successResponse(res, "Subscription details with transaction history fetched successfully", {
-      subscription: subscription,
-
-      // ✅ SIMPLE: Clean transaction history
-      transaction_history: simpleTransactions
+    return successResponse(res, "Subscription details fetched successfully", {
+      subscription: subscription
     });
 
   } catch (error) {
+
     if (error.type === 'StripeInvalidRequestError' && error.code === 'resource_missing') {
       return errorResponse(res, "Subscription not found", 404);
     }
+
     return errorResponse(res, "Error fetching subscription: " + error.message, 500);
   }
 });
 
 /**
- * @desc Get user's subscriptions with SIMPLE transaction history (only successful payments)
+ * @desc Get user's subscriptions from Stripe (current or all) - Fixed version
  * @route GET /api/subscription/list?type=current|all
  * @access Private (User)
  */
@@ -1092,10 +950,11 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
   }
 
   try {
+    // ✅ FIXED: Reduced expansion levels to avoid the 4-level limit
     const subscriptions = await stripe.subscriptions.list({
       customer: user.stripeCustomerId,
       expand: [
-        "data.items.data.price",
+        "data.items.data.price", // Only expand to price level (3 levels)
         "data.latest_invoice",
         "data.default_payment_method"
       ],
@@ -1110,37 +969,12 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
       });
     }
 
-    // ✅ SIMPLE: Get only SUCCESSFUL transactions
-    let simpleTransactions = [];
-    try {
-      const invoices = await stripe.invoices.list({
-        customer: user.stripeCustomerId,
-        limit: 50,
-        status: 'paid', // ✅ ONLY PAID INVOICES
-      });
-
-      simpleTransactions = invoices.data.map(invoice => ({
-        id: invoice.id,
-        number: invoice.number,
-        amount: invoice.amount_paid / 100, // Convert to dollars
-        currency: invoice.currency.toUpperCase(),
-        date: new Date(invoice.created * 1000).toISOString().split('T')[0], // Only date
-        type: invoice.billing_reason === "subscription_cycle" ? "renewal" : "initial",
-        receipt_url: invoice.hosted_invoice_url,
-        subscription_id: invoice.subscription
-      }));
-
-      // Sort by date (newest first)
-      simpleTransactions.sort((a, b) => new Date(b.date) - new Date(a.date));
-    } catch (invoiceError) {
-      console.warn("⚠️ Could not fetch transaction history:", invoiceError.message);
-    }
-
-    // Format subscriptions
+    // ✅ Fetch product details separately for each subscription
     const formattedSubscriptions = await Promise.all(
       subscriptions.data.map(async (sub) => {
         let productDetails = {};
 
+        // Get product details separately to avoid expansion limit
         const price = sub.items.data[0]?.price;
         if (price?.product && typeof price.product === 'string') {
           try {
@@ -1156,39 +990,48 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
           }
         }
 
-        // ✅ SIMPLE: Filter transactions for this subscription
-        const subscriptionTransactions = simpleTransactions.filter(
-          t => t.subscription_id === sub.id
-        );
-
-        const subscriptionData = {
-          stripeSubscriptionId: sub.id,
+        return {
+          id: sub.id,
+          object: sub.object,
           status: sub.status,
-          planType: describePlan(price).planType,
-          amount: price?.unit_amount ? price.unit_amount / 100 : undefined,
-          currency: price?.currency,
-          startDate: new Date(sub.current_period_start * 1000),
-          endDate: new Date(sub.current_period_end * 1000),
-          currentPeriodStart: new Date(sub.current_period_start * 1000),
-          currentPeriodEnd: new Date(sub.current_period_end * 1000),
-          cancelAtPeriodEnd: sub.cancel_at_period_end || false,
+          current_period_start: sub.current_period_start,
+          current_period_end: sub.current_period_end,
+          cancel_at_period_end: sub.cancel_at_period_end,
+          canceled_at: sub.canceled_at,
+          created: sub.created,
+          start_date: sub.start_date,
+          items: {
+            data: sub.items.data.map(item => ({
+              id: item.id,
+              price: {
+                id: item.price.id,
+                product: productDetails.id ? productDetails : item.price.product,
+                unit_amount: item.price.unit_amount,
+                currency: item.price.currency,
+                recurring: item.price.recurring,
+              }
+            }))
+          },
+          latest_invoice: sub.latest_invoice ? {
+            id: sub.latest_invoice.id,
+            status: sub.latest_invoice.status,
+            amount_paid: sub.latest_invoice.amount_paid,
+            amount_due: sub.latest_invoice.amount_due,
+            hosted_invoice_url: sub.latest_invoice.hosted_invoice_url,
+            invoice_pdf: sub.latest_invoice.invoice_pdf,
+          } : null,
+          default_payment_method: sub.default_payment_method ? {
+            id: sub.default_payment_method.id,
+            type: sub.default_payment_method.type,
+            card: sub.default_payment_method.card ? {
+              brand: sub.default_payment_method.card.brand,
+              last4: sub.default_payment_method.card.last4,
+            } : null,
+          } : null,
         };
-
-        const formattedSubscription = formatSubscriptionResponse(
-          subscriptionData,
-          user,
-          sub,
-          sub.latest_invoice,
-          sub.default_payment_method,
-          price
-        );
-
-        // ✅ SIMPLE: Return only basic subscription info
-        return formattedSubscription;
       })
     );
 
-    // ✅ SIMPLE: Return clean response
     return successResponse(res,
       type === "current"
         ? "Current subscription fetched successfully"
@@ -1197,10 +1040,7 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
         object: "list",
         data: formattedSubscriptions,
         has_more: subscriptions.has_more,
-        url: `/v1/subscriptions?customer=${user.stripeCustomerId}`,
-
-        // ✅ SIMPLE: Add transaction history separately
-        transaction_history: simpleTransactions
+        url: `/v1/subscriptions?customer=${user.stripeCustomerId}`
       }
     );
 
@@ -1211,290 +1051,320 @@ export const getUserSubscriptions = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc Verify payment intent and activate subscription - Flutter only
- * @route POST /api/subscription/success-payment
+ * @desc Verify payment and activate subscription
+ * @route POST /api/subscription/verify-payment
  * @access Private
  */
-export const verifyCheckoutSession = async (req, res) => {
+export const getPaymentMethodFromIntent = async (req, res) => {
   try {
     const { paymentIntentId } = req.body;
     const userId = req.user.id;
 
-    console.log(`🔍 [FLUTTER_PAYMENT] Starting verification for user: ${userId}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Starting payment verification for user: ${userId}, paymentIntent: ${paymentIntentId}`);
 
     if (!paymentIntentId) {
-      return errorResponse(res, "paymentIntentId is required", 400);
+      console.log(`❌ [PAYMENT_VERIFY] Missing paymentIntentId for user: ${userId}`);
+      return errorResponse(res, "Payment Intent ID is required", 400);
     }
 
-    // Get user first
-    const user = await User.findById(userId);
-    if (!user) return errorResponse(res, "User not found", 404);
+    // Retrieve payment intent
+    console.log(`🔍 [PAYMENT_VERIFY] Retrieving payment intent: ${paymentIntentId}`);
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId, {
+      expand: ['payment_method', 'invoice.subscription']
+    });
 
-    // ✅ Retrieve payment intent
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-    console.log(`🔍 [FLUTTER_PAYMENT] Payment Intent Status: ${paymentIntent.status}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Payment Intent Status: ${paymentIntent.status}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Payment Intent Amount: ${paymentIntent.amount}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Payment Intent Invoice: ${paymentIntent.invoice}`);
 
+    // Check if payment was successful
     if (paymentIntent.status !== 'succeeded') {
-      return errorResponse(res, `Payment not completed. Status: ${paymentIntent.status}`, 400);
+      console.log(`❌ [PAYMENT_VERIFY] Payment not succeeded: ${paymentIntent.status}`);
+      return errorResponse(res, `Payment status: ${paymentIntent.status}. Please complete the payment first.`, 400);
     }
 
-    // ✅ FIND SUBSCRIPTION RECORD USING PAYMENT INTENT ID
-    const subscriptionRecord = await Subscription.findOne({
-      stripePaymentIntentId: paymentIntentId
-    });
-
-    if (!subscriptionRecord) {
-      return errorResponse(res, "No subscription found for this payment intent", 404);
+    if (!paymentIntent.payment_method) {
+      console.log(`❌ [PAYMENT_VERIFY] No payment method found for payment intent: ${paymentIntentId}`);
+      return errorResponse(res, "No payment method found for this payment", 404);
     }
 
-    // ✅ RETRIEVE THE STRIPE SUBSCRIPTION TO GET ACTUAL DATES
-    let stripeSubscription;
-    try {
-      stripeSubscription = await stripe.subscriptions.retrieve(subscriptionRecord.stripeSubscriptionId);
-    } catch (error) {
-      console.error("❌ Error retrieving Stripe subscription:", error);
-      return errorResponse(res, "Error retrieving subscription details", 500);
-    }
-
-    // ✅ ACTIVATE SUBSCRIPTION USING ACTUAL STRIPE DATES
-    console.log(`✅ Activating subscription for user: ${user.email}`);
-
-    // Update User with actual Stripe dates
-    user.isSubscription = true;
-    user.subscriptionType = subscriptionRecord.planType;
-    user.subscriptionStartDate = new Date(stripeSubscription.current_period_start * 1000);
-    user.subscriptionEndDate = new Date(stripeSubscription.current_period_end * 1000);
-    await user.save();
-
-    // Update Subscription record with actual Stripe dates
-    await Subscription.findOneAndUpdate(
-      { _id: subscriptionRecord._id },
-      {
-        status: stripeSubscription.status,
-        startDate: new Date(stripeSubscription.current_period_start * 1000),
-        endDate: new Date(stripeSubscription.current_period_end * 1000),
-        currentPeriodStart: new Date(stripeSubscription.current_period_start * 1000),
-        currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
-        activatedAt: new Date(),
-      }
-    );
-
-    console.log(`✅ Subscription activated for: ${user.email}`);
-
-    return successResponse(res, "Subscription activated successfully!", {
-      subscription: {
-        id: subscriptionRecord._id,
-        stripeSubscriptionId: subscriptionRecord.stripeSubscriptionId,
-        status: stripeSubscription.status,
-        planType: subscriptionRecord.planType,
-        startDate: new Date(stripeSubscription.current_period_start * 1000),
-        endDate: new Date(stripeSubscription.current_period_end * 1000),
-      },
-      user: {
-        isSubscription: true,
-        subscriptionType: subscriptionRecord.planType,
-      }
-    });
-
-  } catch (error) {
-    console.error("❌ [FLUTTER_PAYMENT] Error:", error);
-    return errorResponse(res, "Payment verification failed: " + error.message, 500);
-  }
-};
-
-/**
- * @desc Get all transactions for a specific user by user ID (Admin only) - Enhanced Version
- * @route GET /api/subscription/admin/user/:userId/transactions
- * @access Private (Admin)
- */
-export const getUserTransactionsAdmin = asyncHandler(async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-
-    if (!req.user?.isAdmin) {
-      return errorResponse(res, "Admin access required", 403);
-    }
-
-    // Find user
+    // Get user
+    console.log(`🔍 [PAYMENT_VERIFY] Finding user: ${userId}`);
     const user = await User.findById(userId);
     if (!user) {
+      console.log(`❌ [PAYMENT_VERIFY] User not found: ${userId}`);
       return errorResponse(res, "User not found", 404);
     }
 
-    if (!user.stripeCustomerId) {
-      return successResponse(res, "User has no Stripe transactions", {
-        transactions: [],
-        user: {
-          id: user._id,
-          email: user.email,
-          name: `${user.firstname} ${user.lastname}`,
-          stripeCustomerId: null
-        },
-        statusSummary: {
-          active: 0,
-          inactive: 0,
-          inactiveBreakdown: {
-            unpaid: 0,
-            draft: 0,
-            failed: 0,
-            in_progress: 0,
-            void: 0,
-            others: 0
-          }
-        }
+    console.log(`🔍 [PAYMENT_VERIFY] User found: ${user.email}, Stripe Customer: ${user.stripeCustomerId}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Current user subscription status: isSubscription=${user.isSubscription}, subscriptionType=${user.subscriptionType}`);
+
+    const paymentMethod = paymentIntent.payment_method;
+    console.log(`🔍 [PAYMENT_VERIFY] Payment Method Type: ${paymentMethod.type}, ID: ${paymentMethod.id}`);
+
+    // Get subscription details
+    let stripeSubscription = null;
+    let invoice = null;
+
+    if (paymentIntent.invoice) {
+      console.log(`🔍 [PAYMENT_VERIFY] Payment intent has invoice: ${paymentIntent.invoice}`);
+      invoice = paymentIntent.invoice;
+
+      if (invoice.subscription) {
+        stripeSubscription = invoice.subscription;
+        console.log(`🔍 [PAYMENT_VERIFY] Found subscription from invoice: ${stripeSubscription.id}`);
+      } else {
+        console.log(`🔍 [PAYMENT_VERIFY] Invoice exists but no subscription attached`);
+      }
+    } else {
+      console.log(`🔍 [PAYMENT_VERIFY] No invoice found in payment intent`);
+    }
+
+    // If no subscription found, search for active ones
+    if (!stripeSubscription && user.stripeCustomerId) {
+      console.log(`🔍 [PAYMENT_VERIFY] Searching for subscriptions for customer: ${user.stripeCustomerId}`);
+      const subscriptions = await stripe.subscriptions.list({
+        customer: user.stripeCustomerId,
+        status: 'active',
+        limit: 1
+      });
+
+      console.log(`🔍 [PAYMENT_VERIFY] Found ${subscriptions.data.length} subscriptions for customer`);
+
+      if (subscriptions.data.length > 0) {
+        stripeSubscription = subscriptions.data[0];
+        console.log(`🔍 [PAYMENT_VERIFY] Using subscription from list: ${stripeSubscription.id}, status: ${stripeSubscription.status}`);
+      }
+    }
+
+    // ✅ Get the plan type from existing subscription record first
+    console.log(`🔍 [PAYMENT_VERIFY] Looking for existing subscription record for user`);
+    let subscriptionRecord = await Subscription.findOne({ userId: user._id });
+    let detectedPlanType = "monthly"; // default
+
+    if (subscriptionRecord) {
+      console.log(`🔍 [PAYMENT_VERIFY] Found existing subscription record: ${subscriptionRecord._id}`);
+      console.log(`🔍 [PAYMENT_VERIFY] Previous plan type: ${subscriptionRecord.planType}`);
+      console.log(`🔍 [PAYMENT_VERIFY] Previous status: ${subscriptionRecord.status}`);
+      
+      // ✅ Use the plan type from subscription record
+      detectedPlanType = subscriptionRecord.planType || "monthly";
+    } else {
+      console.log(`🔍 [PAYMENT_VERIFY] No existing subscription record found`);
+    }
+
+    // ✅ Also check payment intent metadata for plan type
+    if (paymentIntent.metadata?.planType) {
+      detectedPlanType = paymentIntent.metadata.planType;
+      console.log(`🔍 [PAYMENT_VERIFY] Using plan type from payment intent metadata: ${detectedPlanType}`);
+    }
+
+    // ✅ Calculate end date based on actual plan type
+    const now = new Date();
+    let defaultEndDate = new Date();
+
+    if (detectedPlanType === "yearly") {
+      defaultEndDate.setFullYear(defaultEndDate.getFullYear() + 1);
+      console.log(`🔍 [PAYMENT_VERIFY] Yearly plan - setting end date to 1 year from now: ${defaultEndDate}`);
+    } else if (detectedPlanType === "monthly") {
+      defaultEndDate.setMonth(defaultEndDate.getMonth() + 1);
+      console.log(`🔍 [PAYMENT_VERIFY] Monthly plan - setting end date to 1 month from now: ${defaultEndDate}`);
+    } else {
+      defaultEndDate.setMonth(defaultEndDate.getMonth() + 1);
+      console.log(`🔍 [PAYMENT_VERIFY] Unknown plan type (${detectedPlanType}) - defaulting to 1 month: ${defaultEndDate}`);
+    }
+
+    if (!stripeSubscription) {
+      console.log(`⚠️ [PAYMENT_VERIFY] No Stripe subscription found for user ${user.email}`);
+      console.log(`🔍 [PAYMENT_VERIFY] Using calculated end date for ${detectedPlanType} plan: ${defaultEndDate}`);
+    } else {
+      console.log(`✅ [PAYMENT_VERIFY] Stripe subscription found: ${stripeSubscription.id}`);
+      console.log(`🔍 [PAYMENT_VERIFY] Subscription status: ${stripeSubscription.status}`);
+      console.log(`🔍 [PAYMENT_VERIFY] Current period: ${new Date(stripeSubscription.current_period_start * 1000)} to ${new Date(stripeSubscription.current_period_end * 1000)}`);
+      
+      // Update detected plan type from Stripe subscription
+      const stripePlanType = describePlan(stripeSubscription.items.data[0]?.price).planType;
+      if (stripePlanType !== "unknown") {
+        detectedPlanType = stripePlanType;
+        console.log(`🔍 [PAYMENT_VERIFY] Updated plan type from Stripe: ${detectedPlanType}`);
+      }
+    }
+
+    // ✅ CRITICAL - Always set the subscriptionType on user
+    console.log(`🔍 [PAYMENT_VERIFY] Setting user subscription to active with type: ${detectedPlanType}`);
+
+    user.isSubscription = true;
+    user.subscriptionActivatedAt = now;
+    user.subscriptionType = detectedPlanType; // ✅ This was missing!
+
+    if (stripeSubscription) {
+      user.subscriptionStartDate = new Date(stripeSubscription.current_period_start * 1000);
+      user.subscriptionEndDate = new Date(stripeSubscription.current_period_end * 1000);
+      console.log(`🔍 [PAYMENT_VERIFY] User dates from Stripe - Start: ${user.subscriptionStartDate}, End: ${user.subscriptionEndDate}, Type: ${detectedPlanType}`);
+    } else {
+      // ✅ Set both dates when no Stripe subscription found - use calculated dates based on plan type
+      user.subscriptionStartDate = now;
+      user.subscriptionEndDate = defaultEndDate;
+      console.log(`🔍 [PAYMENT_VERIFY] User dates set manually - Start: ${user.subscriptionStartDate}, End: ${user.subscriptionEndDate}, Type: ${detectedPlanType}`);
+    }
+
+    console.log(`🔍 [PAYMENT_VERIFY] Saving user to database...`);
+    console.log(`🔍 [PAYMENT_VERIFY] User subscription data before save:`, {
+      isSubscription: user.isSubscription,
+      subscriptionType: user.subscriptionType,
+      subscriptionStartDate: user.subscriptionStartDate,
+      subscriptionEndDate: user.subscriptionEndDate
+    });
+    
+    await user.save();
+    console.log(`✅ [PAYMENT_VERIFY] User saved successfully`);
+
+    // Update subscription record
+    if (subscriptionRecord) {
+      console.log(`🔍 [PAYMENT_VERIFY] Updating existing subscription record: ${subscriptionRecord._id}`);
+      console.log(`🔍 [PAYMENT_VERIFY] Previous status: ${subscriptionRecord.status}`);
+
+      subscriptionRecord.status = "active";
+      subscriptionRecord.stripeSubscriptionId = stripeSubscription?.id || `sub_${Date.now()}`;
+      subscriptionRecord.stripePaymentIntentId = paymentIntentId;
+      subscriptionRecord.paymentMethodId = paymentMethod.id;
+      subscriptionRecord.activatedAt = now;
+      subscriptionRecord.startDate = user.subscriptionStartDate;
+      subscriptionRecord.endDate = user.subscriptionEndDate;
+      subscriptionRecord.planType = detectedPlanType; // ✅ Ensure plan type is set
+
+      if (stripeSubscription) {
+        subscriptionRecord.currentPeriodStart = new Date(stripeSubscription.current_period_start * 1000);
+        subscriptionRecord.currentPeriodEnd = new Date(stripeSubscription.current_period_end * 1000);
+      } else {
+        // ✅ Set default period dates when no Stripe subscription
+        subscriptionRecord.currentPeriodStart = now;
+        subscriptionRecord.currentPeriodEnd = defaultEndDate;
+      }
+
+      console.log(`🔍 [PAYMENT_VERIFY] Subscription record dates - Start: ${subscriptionRecord.startDate}, End: ${subscriptionRecord.endDate}, Type: ${subscriptionRecord.planType}`);
+    } else {
+      console.log(`🔍 [PAYMENT_VERIFY] No existing subscription record found, creating new one`);
+
+      const price = stripeSubscription?.items.data[0]?.price;
+
+      // ✅ Ensure all required fields have values with correct plan type
+      subscriptionRecord = new Subscription({
+        userId: user._id,
+        stripeCustomerId: user.stripeCustomerId,
+        stripeSubscriptionId: stripeSubscription?.id || `sub_${Date.now()}`,
+        stripePaymentIntentId: paymentIntentId,
+        paymentMethodId: paymentMethod.id,
+        priceId: price?.id,
+        amount: price?.unit_amount ? price.unit_amount / 100 : paymentIntent.amount / 100,
+        currency: price?.currency || paymentIntent.currency,
+        planType: detectedPlanType, // ✅ Use the detected plan type
+        status: "active",
+        startDate: user.subscriptionStartDate,
+        endDate: user.subscriptionEndDate,
+        currentPeriodStart: stripeSubscription ? new Date(stripeSubscription.current_period_start * 1000) : user.subscriptionStartDate,
+        currentPeriodEnd: stripeSubscription ? new Date(stripeSubscription.current_period_end * 1000) : user.subscriptionEndDate,
+        activatedAt: now,
       });
     }
 
-    // Fetch all invoices for the customer
-    const invoices = await stripe.invoices.list({
-      customer: user.stripeCustomerId,
-      limit: 100,
+    console.log(`🔍 [PAYMENT_VERIFY] Saving subscription record...`);
+    await subscriptionRecord.save();
+    console.log(`✅ [PAYMENT_VERIFY] Subscription record saved: ${subscriptionRecord._id}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Subscription record details:`, {
+      id: subscriptionRecord._id,
+      stripeSubscriptionId: subscriptionRecord.stripeSubscriptionId,
+      status: subscriptionRecord.status,
+      planType: subscriptionRecord.planType,
+      startDate: subscriptionRecord.startDate,
+      endDate: subscriptionRecord.endDate
     });
 
-    // Status counters
-    let activeCount = 0;
-    let inactiveCount = 0;
-    const inactiveBreakdown = {
-      unpaid: 0,      // open status, not paid
-      draft: 0,       // draft status
-      failed: 0,      // status failed or payment failed
-      in_progress: 0, // processing, pending
-      void: 0,        // void status
-      others: 0       // any other status
-    };
+    // ✅ Double-check that user has subscriptionType set
+    const updatedUser = await User.findById(userId);
+    console.log(`🔍 [PAYMENT_VERIFY] Final user verification - subscriptionType: ${updatedUser.subscriptionType}`);
 
-    const transactions = await Promise.all(
-      invoices.data.map(async (invoice) => {
-        // Get subscription details if available
-        let subscriptionDetails = null;
-        if (invoice.subscription) {
-          try {
-            const subscription = await stripe.subscriptions.retrieve(invoice.subscription);
-            const price = subscription.items.data[0]?.price;
-            const { planType } = describePlan(price);
-
-            subscriptionDetails = {
-              id: subscription.id,
-              status: subscription.status,
-              planType: planType,
-              currentPeriodEnd: subscription.current_period_end,
-            };
-          } catch (error) {
-            console.warn(`Could not fetch subscription ${invoice.subscription}:`, error.message);
-          }
-        }
-
-        // Enhanced status detection
-        let isActive = false;
-        let detailedStatus = invoice.status;
-
-        if (invoice.status === 'paid' && invoice.paid === true) {
-          isActive = true;
-          activeCount++;
-        } else {
-          isActive = false;
-          inactiveCount++;
-
-          // Detailed inactive status categorization
-          switch (invoice.status) {
-            case 'draft':
-              inactiveBreakdown.draft++;
-              detailedStatus = 'draft';
-              break;
-            case 'open':
-              inactiveBreakdown.unpaid++;
-              detailedStatus = 'unpaid';
-              break;
-            case 'void':
-              inactiveBreakdown.void++;
-              detailedStatus = 'void';
-              break;
-            case 'uncollectible':
-              inactiveBreakdown.failed++;
-              detailedStatus = 'failed';
-              break;
-            default:
-              if (!invoice.paid && invoice.attempted) {
-                inactiveBreakdown.failed++;
-                detailedStatus = 'failed';
-              } else if (!invoice.paid && !invoice.attempted) {
-                inactiveBreakdown.in_progress++;
-                detailedStatus = 'in_progress';
-              } else {
-                inactiveBreakdown.others++;
-                detailedStatus = invoice.status;
-              }
-          }
-        }
-
-        return {
-          id: invoice.id,
-          type: 'invoice',
-          number: invoice.number,
-          amount_due: invoice.amount_due,
-          amount_paid: invoice.amount_paid,
-          amount_remaining: invoice.amount_remaining,
-          currency: invoice.currency.toUpperCase(),
-          status: invoice.status,
-          detailedStatus: detailedStatus, // Enhanced status field
-          created: invoice.created,
-          date: new Date(invoice.created * 1000).toISOString(),
-          paid: invoice.paid,
-          attempted: invoice.attempted,
-          receipt_url: invoice.hosted_invoice_url,
-          invoice_pdf: invoice.invoice_pdf,
-          subscription_id: invoice.subscription,
-          payment_intent: invoice.payment_intent,
-          subscription: subscriptionDetails,
-          isActive: isActive
-        };
-      })
+    // Log and notify
+    console.log(`🔍 [PAYMENT_VERIFY] Creating lifecycle log...`);
+    await logSubscriptionLifecycle(
+      'PAYMENT_VERIFIED_AND_ACTIVATED',
+      {
+        paymentIntentId,
+        subscriptionId: stripeSubscription?.id,
+        userStartDate: user.subscriptionStartDate,
+        userEndDate: user.subscriptionEndDate,
+        planType: detectedPlanType
+      },
+      user,
+      {
+        apiSource: 'verify-payment',
+        paymentMethodId: paymentMethod.id
+      }
     );
 
-    // Sort by date (newest first)
-    transactions.sort((a, b) => b.created - a.created);
+    console.log(`🔍 [PAYMENT_VERIFY] Sending notification to user...`);
+    await notifyUser(
+      user,
+      "Payment Verified & Subscription Activated 🎉",
+      `Your ${detectedPlanType} subscription is now active until ${user.subscriptionEndDate.toLocaleDateString()}. Thank you for your payment!`,
+      {
+        deeplink: "/subscription",
+        data: {
+          action: "subscription_activated",
+          paymentIntentId: paymentIntentId,
+          startDate: user.subscriptionStartDate,
+          endDate: user.subscriptionEndDate,
+          planType: detectedPlanType
+        },
+      }
+    );
 
-    // Paginate
-    const startIndex = (page - 1) * limit;
-    const endIndex = page * limit;
-    const paginatedTransactions = transactions.slice(startIndex, endIndex);
+    console.log(`✅ [PAYMENT_VERIFY] SUCCESS - Payment verified and subscription activated for user: ${user.email}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Final user status: isSubscription=${user.isSubscription}, type=${user.subscriptionType}`);
+    console.log(`🔍 [PAYMENT_VERIFY] Final subscription record: ${subscriptionRecord._id}, status=${subscriptionRecord.status}, type=${subscriptionRecord.planType}`);
 
-    return successResponse(res, "User transactions fetched successfully", {
-      transactions: paginatedTransactions,
-      pagination: {
-        currentPage: page,
-        perPage: limit,
-        totalPages: Math.ceil(transactions.length / limit),
-        totalData: transactions.length,
-        hasMore: endIndex < transactions.length
+    return successResponse(res, "Payment verified and subscription activated successfully!", {
+      payment: {
+        paymentIntentId: paymentIntent.id,
+        status: paymentIntent.status,
+        amount: paymentIntent.amount,
+        currency: paymentIntent.currency
+      },
+      subscription: {
+        id: subscriptionRecord._id,
+        status: "active",
+        planType: subscriptionRecord.planType,
+        startDate: subscriptionRecord.startDate,
+        endDate: subscriptionRecord.endDate,
       },
       user: {
-        id: user._id,
-        email: user.email,
-        name: `${user.firstname} ${user.lastname}`,
-        stripeCustomerId: user.stripeCustomerId,
         isSubscription: user.isSubscription,
         subscriptionType: user.subscriptionType,
+        subscriptionStartDate: user.subscriptionStartDate,
+        subscriptionEndDate: user.subscriptionEndDate
       },
-      summary: {
-        total_transactions: transactions.length,
-        total_amount_paid: transactions.reduce((sum, t) => sum + (t.amount_paid || 0), 0),
-        currency: 'USD'
-      },
-      statusSummary: {
-        active: activeCount,
-        inactive: inactiveCount,
-        inactiveBreakdown: inactiveBreakdown,
-        // Additional calculated fields
-        successRate: transactions.length > 0 ? Math.round((activeCount / transactions.length) * 100) : 0,
-        failureRate: transactions.length > 0 ? Math.round((inactiveBreakdown.failed / transactions.length) * 100) : 0
-      }
+      message: `Your ${detectedPlanType} subscription is now active!`
     });
 
   } catch (error) {
-    console.error("❌ getUserTransactionsAdmin error:", error);
-    return errorResponse(res, "Error fetching user transactions: " + error.message, 500);
+    console.error("❌ [PAYMENT_VERIFY] verifyPaymentSuccess error:", error);
+    console.error("❌ [PAYMENT_VERIFY] Error details:", error.stack);
+
+    await logSubscriptionLifecycle(
+      'PAYMENT_VERIFICATION_FAILED',
+      { error: error.message },
+      null,
+      {
+        apiSource: 'verify-payment',
+        stack: error.stack
+      }
+    );
+
+    if (error.code === 'resource_missing') {
+      console.log(`❌ [PAYMENT_VERIFY] Resource missing error - Payment Intent may not exist`);
+      return errorResponse(res, "Payment Intent does not exist. Please check and try again.", 404);
+    }
+
+    return errorResponse(res, "Payment verification failed: " + error.message, 500);
   }
-});
+};

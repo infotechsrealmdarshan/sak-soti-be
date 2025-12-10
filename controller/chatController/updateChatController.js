@@ -91,7 +91,7 @@ export const editMessage = asyncHandler(async (req, res) => {
     const messageDate = new Date(message.createdAt);
     const now = new Date();
     const twelveHoursMs = 12 * 60 * 60 * 1000;
-
+    
     if (now.getTime() - messageDate.getTime() > twelveHoursMs) {
       return errorResponse(res, "Message can only be edited within 12 hours of sending", 400);
     }
@@ -111,7 +111,7 @@ export const editMessage = asyncHandler(async (req, res) => {
     ).populate("messages.sender", "firstname lastname profileimg");
 
     let messageResponse;
-
+    
     if (populatedConversation?.messages?.[0]) {
       const populatedMessage = populatedConversation.messages[0];
       messageResponse = {
@@ -141,16 +141,18 @@ export const editMessage = asyncHandler(async (req, res) => {
     // ✅ FIXED: Enhanced socket event (same event name, more reliable)
     try {
       const io = getIO();
-
+      
       // Ensure all clients are in the room
       io.to(`chat:${String(chatId)}`).emit('messageEdited', {
         chatId: String(chatId),
         messageId: String(updatedMessage._id),
-        content: updatedMessage.content
+        content: updatedMessage.content,
+        isEdited: true,
+        editedAt: updatedMessage.editedAt
       });
-
+      
       console.log(`✅ Socket: Emitted messageEdited for chat ${chatId}`);
-
+      
     } catch (err) {
       console.error("Socket emit error (message edited):", err.message);
     }
@@ -335,7 +337,7 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
     const isAlreadyDeletedForEveryone = message.isDeleteEvery === true;
     const isAlreadyDeletedForMe = deletedForMeMap.has(msgId);
     const isAlreadyDeleted = isAlreadyDeletedForEveryone || isAlreadyDeletedForMe;
-
+    
     if (isAlreadyDeleted) {
       alreadyDeletedMessages.push({
         id: msgId,
@@ -522,10 +524,18 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
     const io = getIO();
     const deletionData = {
       chatId: String(chatKeyId),
-      messageIds: messagesToDelete.map(m => m.id),
-      deleteFor: finalDeleteFor,
+      deletedMessageIds: messagesToDelete.map(m => m.id),
+      deletedCount: messagesToDelete.length,
       deletedBy: String(userId),
-      timestamp: now
+      deleteFor: finalDeleteFor,
+      isBulk: true,
+      timestamp: now,
+      // NEW: Include deletion type information
+      isDeleteMe: finalDeleteFor === 'me',
+      isDeleteEvery: finalDeleteFor === 'everyone',
+      // Include information about already deleted messages
+      alreadyDeletedCount: alreadyDeletedMessages.length,
+      alreadyDeletedMessageIds: alreadyDeletedMessages.map(m => m.id)
     };
 
     if (finalDeleteFor === 'everyone') {
@@ -536,9 +546,10 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
           chatId: String(chatKeyId),
           action: "messagesDeleted",
           type: isGroup ? "group" : "individual",
-          messageIds: messagesToDelete.map(m => m.id),
+          deletedMessageIds: messagesToDelete.map(m => m.id),
           deleteFor: 'everyone',
-          timestamp: now
+          isDeleteMe: false,
+          isDeleteEvery: true
         });
       });
 
@@ -581,9 +592,10 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
         chatId: String(chatKeyId),
         action: "messagesDeleted",
         type: isGroup ? "group" : "individual",
-        messageIds: messagesToDelete.map(m => m.id),
+        deletedMessageIds: messagesToDelete.map(m => m.id),
         deleteFor: 'me',
-        timestamp: now
+        isDeleteMe: true,
+        isDeleteEvery: false
       });
     }
 
@@ -603,11 +615,14 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
 
   // ✅ FINAL RESPONSE WITH NEW STRUCTURE
   const responseData = {
-    chatId: String(chatKeyId),
-    messageIds: messagesToDelete.map(m => m.id),
-    deleteFor: finalDeleteFor,
     deletedCount: messagesToDelete.length,
-    containedReceivedMessages: containsReceivedMessages
+    deletedMessageIds: messagesToDelete.map(m => m.id),
+    deleteFor: finalDeleteFor,
+    chatId: String(chatKeyId),
+    containedReceivedMessages: containsReceivedMessages,
+    // NEW: Add deletion type flags
+    isDeleteMe: finalDeleteFor === 'me',
+    isDeleteEvery: finalDeleteFor === 'everyone'
   };
 
   // Add information about already deleted messages if any

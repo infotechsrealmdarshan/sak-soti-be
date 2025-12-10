@@ -1,6 +1,5 @@
 import User from "../models/User.js";
 import redisClient from "../config/redis.js";
-import Subscription from "../models/Subscription.js"; // Add this import
 
 /**
  * Check and update expired subscriptions
@@ -74,21 +73,9 @@ export const checkAndExpireSubscription = async (user) => {
     return { expired: false, user };
   }
 
-  // ✅ FIRST: Check if user has ACTIVE Stripe subscription
-  const activeSubscription = await Subscription.findOne({ 
-    userId: user._id, 
-    status: 'active' 
-  });
-
-  // ✅ If Stripe subscription is ACTIVE, DON'T expire (even if local date passed)
-  if (activeSubscription) {
-    console.log(`✅ User ${user.email} has active Stripe subscription - skipping manual expiration`);
-    return { expired: false, user };
-  }
-
   const now = new Date();
   
-  // ✅ Only expire if subscription end date passed AND no active Stripe subscription
+  // If subscription end date has passed, expire the subscription
   if (user.subscriptionEndDate < now) {
     console.log(`🔄 Auto-expiring subscription for user: ${user.email}`);
     

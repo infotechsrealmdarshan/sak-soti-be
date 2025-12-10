@@ -11,23 +11,6 @@ import redisClient from "../../config/redis.js";
 import ChatConversation from "../../models/ChatConversation.js";
 import { removeDeletedUserFromGroups } from "../../utils/chatHelper.js";
 
-// Helper function to delete Redis keys by pattern
-const deleteRedisKeysByPattern = async (pattern) => {
-  if (!redisClient || typeof redisClient.scan !== "function") return;
-  try {
-    let cursor = "0";
-    do {
-      const [nextCursor, keys] = await redisClient.scan(cursor, "MATCH", pattern, "COUNT", 50);
-      cursor = nextCursor;
-      if (Array.isArray(keys) && keys.length > 0) {
-        await redisClient.del(...keys);
-      }
-    } while (cursor !== "0");
-  } catch (err) {
-    console.warn(`Redis delete failed for pattern ${pattern}:`, err.message);
-  }
-};
-
 export const getEligibleUsersForGroup = asyncHandler(async (req, res) => {
   const userId = req.user?.id;
   const myPostsCount = await Post.countDocuments({ author: userId });
@@ -134,6 +117,8 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
   }
 
   // ✅ Fetch accepted chats between creator and requested members
+  // Check both individual chats AND previously accepted group invitations
+  // Convert all IDs to ensure proper MongoDB query matching
   const creatorIdForQuery = mongoose.Types.ObjectId.isValid(creatorId)
     ? new mongoose.Types.ObjectId(creatorId)
     : creatorId;
@@ -154,7 +139,8 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     ],
   }).select("senderId receiverId");
 
-  // Check for previously accepted group invitations
+  // Check for previously accepted group invitations (even if group was deleted)
+  // If user accepted a group invitation before, add them directly to new groups
   const acceptedGroupInvitations = await ChatRequest.find({
     chatType: "group",
     status: "accepted",
@@ -162,10 +148,11 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     receiverId: { $in: filteredInputIdsForQuery },
   }).select("senderId receiverId");
 
-  // Check previous group memberships
+  // Also check if user was ever a member of any group created by this creator
+  // This helps even if invitation records were deleted when group was deleted
   const previousGroupMemberships = await ChatRequest.find({
     chatType: "group",
-    receiverId: null,
+    receiverId: null, // Group root documents
     senderId: creatorIdForQuery,
     $or: [
       { members: { $in: filteredInputIdsForQuery } },
@@ -173,6 +160,7 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     ]
   }).select("members superAdmins");
 
+  // Extract user IDs from previous group memberships
   const previousGroupMemberIds = new Set();
   previousGroupMemberships.forEach(group => {
     (group.members || []).forEach(memberId => {
@@ -189,34 +177,47 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     });
   });
 
+  // Add users who were in previous groups to accepted list
   const previousGroupMemberIdsArray = Array.from(previousGroupMemberIds);
   if (previousGroupMemberIdsArray.length > 0) {
     console.log("Users found in previous groups (adding directly):", previousGroupMemberIdsArray);
   }
 
+  // Combine both types of accepted chats
   const acceptedChats = [...acceptedIndividualChats, ...acceptedGroupInvitations];
+
+  // ✅ Determine who has accepted chats (convert all to strings for consistent comparison)
   const acceptedMemberIdsFromChats = acceptedChats.map((chat) => {
     const senderIdStr = String(chat.senderId);
     const receiverIdStr = String(chat.receiverId);
     const creatorIdStrForCompare = String(creatorId);
+
+    // Return the other user's ID (not the creator)
     return senderIdStr === creatorIdStrForCompare ? receiverIdStr : senderIdStr;
   });
 
+  // Combine accepted chats with previous group members
   const acceptedMemberIds = Array.from(new Set([
     ...acceptedMemberIdsFromChats,
     ...previousGroupMemberIdsArray
   ]));
 
+  // ✅ Log for debugging (remove in production if needed)
   if (acceptedMemberIds.length > 0) {
     console.log(`Found ${acceptedMemberIds.length} users with accepted chats:`, acceptedMemberIds);
   }
 
+  // ✅ Convert to Set for faster lookup and ensure all are strings
   const acceptedMemberIdsSet = new Set(acceptedMemberIds.map(id => String(id)));
+
+  // ✅ Split members vs invitations (before checking admins)
+  // Users with accepted individual chats are added directly, no invitation needed
   const initialConfirmedMembers = Array.from(new Set([
     String(creatorId),
     ...Array.from(acceptedMemberIdsSet)
   ]));
 
+  // ✅ Only users without accepted chats go to invitation list
   const initialInvitationIds = filteredInputIds.filter(
     (id) => {
       const idStr = String(id);
@@ -224,11 +225,15 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     }
   );
 
+  // ✅ Fetch creator data to check isAdmin status
   const creator = await User.findById(creatorId).select("firstname lastname isAdmin");
   if (!creator) {
     return errorResponse(res, "Creator user not found", 404);
   }
 
+  // ✅ Check if any users in invitationIds have isAdmin: true
+  // Super admins (isAdmin: true) should be added directly, not sent invitations
+  // Convert initialInvitationIds to ObjectIds for proper MongoDB query
   const initialInvitationIdsObjectIds = initialInvitationIds.map(id => {
     try {
       return mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : id;
@@ -244,34 +249,47 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     .filter((user) => user.isAdmin === true)
     .map((user) => user._id.toString());
 
+  // Debug: Log admins found from invitations
   if (adminIdsFromInvitations.length > 0) {
     console.log("Admins found from invitations and added directly:", adminIdsFromInvitations);
   }
 
+  // ✅ Add admins directly to confirmed members (no invitation needed)
   let confirmedMembers = Array.from(new Set([...initialConfirmedMembers, ...adminIdsFromInvitations]));
+
+  // ✅ Remove admins from invitation list (they are added directly)
   const invitationIds = initialInvitationIds.filter(
     (id) => !adminIdsFromInvitations.includes(String(id))
   );
 
+  // ✅ Find ALL super admins from database (not just from memberIds)
+  // OLD CODE (single admin): const superAdminUser = await User.findOne({ isAdmin: true })
+  // NEW CODE: Get ALL users with isAdmin: true and add them all
   const allSuperAdminUsers = await User.find({ isAdmin: true })
     .select("_id isAdmin")
-    .sort({ createdAt: 1 });
+    .sort({ createdAt: 1 }); // Sort by creation date for consistency
 
+  // ✅ If super admins found, add them all to confirmed members and superAdmins
   let superAdminsList = [];
   if (allSuperAdminUsers && allSuperAdminUsers.length > 0) {
+    // Add all super admins to confirmed members if not already there
     allSuperAdminUsers.forEach(superAdminUser => {
       const superAdminId = String(superAdminUser._id);
       if (!confirmedMembers.includes(superAdminId)) {
         confirmedMembers.push(superAdminId);
       }
     });
-    confirmedMembers = Array.from(new Set(confirmedMembers));
+    confirmedMembers = Array.from(new Set(confirmedMembers)); // Remove duplicates
+
+    // Add all super admins to superAdmins list (multiple admins support)
     superAdminsList = allSuperAdminUsers.map(admin => admin._id);
+
     console.log(`Found ${allSuperAdminUsers.length} super admin(s) and added:`, superAdminsList.map(id => String(id)));
   } else {
     console.log("No super admin found in database");
   }
 
+  // ✅ Generate default group name if not provided
   let groupName = String(name || "").trim();
   if (!groupName) {
     const displayNames = [creator, ...users]
@@ -281,36 +299,39 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     groupName = displayNames.join(", ");
   }
 
+  // ✅ Create group root document in ChatRequest
   const group = await ChatRequest.create({
     senderId: creatorId,
     receiverId: null,
     chatType: "group",
     status: "accepted",
-    groupId: undefined,
+    groupId: undefined, // will set to self
     name: groupName,
     groupAdmin: creatorId,
     superAdmins: superAdminsList,
-    members: confirmedMembers.filter(id =>
-      String(id) !== String(creatorId) &&
-      !superAdminsList.map(String).includes(String(id))
-    ),
+    members: confirmedMembers,
     pendingMembers: [],
     groupImage: groupImage,
   });
 
+  // ✅ Set groupId to self
   if (!group.groupId) {
     group.groupId = group._id;
     await group.save();
   }
 
+  // ✅ Create ChatRequest invitations for users without accepted chats
+  // Explicitly exclude creator from invitations (double-check filter)
   const finalInvitationIds = invitationIds.filter(
     (id) => String(id) !== creatorIdStr
   );
 
   const invitationRequests = [];
   for (const inviteeId of finalInvitationIds) {
+    // Double check: ensure creator is not in the list
     if (String(inviteeId) === creatorIdStr) continue;
 
+    // Check if invitation already exists
     const existingInvite = await ChatRequest.findOne({
       senderId: creatorId,
       receiverId: inviteeId,
@@ -338,14 +359,15 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
 
     const titleAdded = "Added to Group";
     const titleInvited = "Group Invitation";
-    const groupNameForNotification = group.name || "New Group";
+    const groupName = group.name || "New Group";
 
+    // 🔹 For directly added members
     const directAddedMembers = confirmedMembers.filter(id => String(id) !== String(creatorId));
     for (const memberId of directAddedMembers) {
       const member = await User.findById(memberId).select("fcmToken email");
       if (!member) continue;
 
-      const body = `${creatorName} added you to group "${groupNameForNotification}".`;
+      const body = `${creatorName} added you to group “${groupName}”.`;
       const notification = await Notification.create({
         userId: member._id,
         title: titleAdded,
@@ -353,25 +375,28 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
         deeplink: "",
       });
 
+      console.log("Member info for group added notification>>>>>>>>>>>:", notification);
+
       if (member.fcmToken) {
         const pushResult = await sendFirebaseNotification(
           member.fcmToken,
           titleAdded,
           body,
-          { type: "group_added", chatId: group._id.toString(), senderId: creatorId }
+          { type: "group_added", groupId: group._id.toString(), senderId: creatorId }
         );
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";
         await notification.save();
       }
 
-      io.to(`user:${memberId}`).emit("group:added", { groupId: group._id, groupName: groupNameForNotification });
+      io.to(`user:${memberId}`).emit("group:added", { groupId: group._id, groupName });
     }
 
+    // 🔹 For invited members
     for (const invite of invitationRequests) {
       const invitee = await User.findById(invite.receiverId).select("fcmToken email");
       if (!invitee) continue;
 
-      const body = `${creatorName} invited you to join group "${groupNameForNotification}".`;
+      const body = `${creatorName} invited you to join group “${groupName}”.`;
       const notification = await Notification.create({
         userId: invitee._id,
         title: titleInvited,
@@ -379,28 +404,33 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
         deeplink: "",
       });
 
+      console.log("Invitee info for group invitation notification>>>>>>>>>>>:", notification);
+
       if (invitee.fcmToken) {
         const pushResult = await sendFirebaseNotification(
           invitee.fcmToken,
           titleInvited,
           body,
-          { type: "group_invitation", chatId: group._id.toString(), senderId: creatorId }
+          { type: "group_invitation", groupId: group._id.toString(), senderId: creatorId }
         );
         notification.firebaseStatus = pushResult.success ? "sent" : "failed";
         await notification.save();
       }
 
-      io.to(`user:${invite.receiverId}`).emit("group:invited", { groupId: group._id, groupName: groupNameForNotification });
+      io.to(`user:${invite.receiverId}`).emit("group:invited", { groupId: group._id, groupName });
     }
   } catch (err) {
     console.error("❌ Error sending group create notifications:", err.message);
   }
 
-  const populated = await ChatRequest.findById(group._id)
-    .populate({ path: "groupAdmin", select: "firstname lastname email isAdmin profileimg" })
-    .populate({ path: "superAdmins", select: "firstname lastname email isAdmin profileimg" })
-    .populate({ path: "members", select: "firstname lastname email profileimg" });
 
+  // ✅ Populate group data
+  const populated = await ChatRequest.findById(group._id)
+    .populate({ path: "groupAdmin", select: "firstname lastname email isAdmin" })
+    .populate({ path: "superAdmins", select: "firstname lastname email isAdmin" })
+    .populate({ path: "members", select: "firstname lastname email" });
+
+  // ✅ Record join time for initial members in conversation doc
   try {
     const initialParticipantIds = new Set();
     initialParticipantIds.add(String(creatorId));
@@ -429,75 +459,33 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     console.warn("⚠️ Failed to record initial group join times:", err.message);
   }
 
-  // ✅ Format response to match group retrieval API format
   const populatedCreatorIdStr = populated.groupAdmin?._id?.toString();
   const adminIdSet = new Set(
     (populated.superAdmins || []).map((a) => a._id.toString())
   );
 
-  // ✅ Get all members including creator for display
-  const allDisplayMembers = [
-    ...(populated.members || []),
-    populated.groupAdmin
-  ].filter(Boolean);
-
-  // Filter out deleted users and super admins (but keep creator)
-  const filteredMembers = allDisplayMembers.filter((m) => {
-    if (!m) return false;
-    if (m.isDeleted === true) return false;
-
-    const mid = m._id.toString();
-    return !adminIdSet.has(mid) || mid === populatedCreatorIdStr;
+  // ✅ Filter members excluding creator/admins from member list (for display only)
+  const filteredMembers = (populated.members || []).filter((m) => {
+    const id = m._id.toString();
+    return id !== populatedCreatorIdStr && !adminIdSet.has(id);
   });
 
-  // ✅ Add userType to each member
-  const enhancedMembers = filteredMembers.map(member => {
-    const memberIdStr = String(member._id);
-    let userType = 'member';
+  const responseData = populated.toObject();
+  responseData.members = filteredMembers;
 
-    if (memberIdStr === populatedCreatorIdStr) {
-      userType = 'creator';
-    } else if (adminIdSet.has(memberIdStr)) {
-      userType = 'superAdmin';
-    }
-
-    return {
-      _id: member._id,
-      firstname: member.firstname || "",
-      lastname: member.lastname || "",
-      email: member.email || "",
-      profileimg: member.profileimg || "/uploads/default.png",
-      isDeleted: member.isDeleted || false,
-      isAdmin: member.isAdmin || false,
-      userType: userType
-    };
+  // ✅ Compute all unique user IDs (super admin, admin, and members) for total count
+  const allUniqueUserIds = new Set();
+  if (populated.groupAdmin?._id) {
+    allUniqueUserIds.add(populated.groupAdmin._id.toString());
+  }
+  (populated.superAdmins || []).forEach((a) => {
+    if (a._id) allUniqueUserIds.add(a._id.toString());
+  });
+  (populated.members || []).forEach((m) => {
+    if (m._id) allUniqueUserIds.add(m._id.toString());
   });
 
-  // Create the response object
-  const responseData = {
-    _id: populated._id,
-    senderId: populated.senderId,
-    receiverId: null,
-    chatType: "group",
-    status: "accepted",
-    name: populated.name,
-    groupImage: populated.groupImage,
-    members: enhancedMembers,
-    pendingMembers: populated.pendingMembers || [],
-    isSystemGroup: populated.isSystemGroup || false,
-    messages: populated.messages || [],
-    createdAt: populated.createdAt,
-    updatedAt: populated.updatedAt,
-    __v: populated.__v,
-    groupId: populated.groupId,
-    groupName: populated.name || "Group"
-  };
-
-  // Remove unnecessary fields
-  delete responseData.groupAdmin;
-  delete responseData.superAdmins;
-
-  // ✅ Compute counts
+  // ✅ Compute accurate unique admin counts
   const uniqueAdminIds = new Set(
     [
       populated.groupAdmin?._id?.toString(),
@@ -505,7 +493,7 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     ].filter(Boolean)
   );
 
-  // ✅ Build final response with counts
+  // ✅ Build final response - ensure creator is not in invitations list (triple-check filter)
   const finalInvitationsList = finalInvitationIds.filter(
     (id) => String(id) !== creatorIdStr
   );
@@ -515,39 +503,26 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     counts: {
       creatorCount: populated.groupAdmin ? 1 : 0,
       adminsCount: uniqueAdminIds.size,
-      membersCount: enhancedMembers.length,
+      membersCount: allUniqueUserIds.size, // Total count of all unique users (super admin, admin, and members)
     },
-    invitations: finalInvitationsList,
+    invitations: finalInvitationsList, // List of user IDs who received invitations (creator excluded)
   };
 
-  // ✅ Clear Redis cache
+  // ✅ Clear Redis cache for creator and invitees
   try {
     if (redisClient) {
-      const cacheKeys = [
-        `requests:${String(creatorId)}:group:*`,
-        `requests:${String(creatorId)}:accepted:*`
-      ];
-
-      const allUserIds = [
-        ...confirmedMembers,
-        ...finalInvitationsList
-      ];
-
-      allUserIds.forEach(userId => {
-        if (String(userId) !== creatorIdStr) {
-          cacheKeys.push(`requests:${String(userId)}:group:*`);
-          cacheKeys.push(`requests:${String(userId)}:received:*`);
-          cacheKeys.push(`requests:${String(userId)}:accepted:*`);
+      const cacheKeys = [`requests:${String(creatorId)}:group`];
+      // Also clear cache for invitees (excluding creator)
+      finalInvitationsList.forEach((inviteeId) => {
+        if (String(inviteeId) !== creatorIdStr) {
+          cacheKeys.push(`requests:${String(inviteeId)}:group`);
+          cacheKeys.push(`requests:${String(inviteeId)}:received`);
         }
       });
-
-      await Promise.all([
-        ...cacheKeys.map(pattern => deleteRedisKeysByPattern(pattern)),
-        redisClient.del([`requests:${String(creatorId)}:group`])
-      ]);
+      await redisClient.del(cacheKeys);
     }
   } catch (err) {
-    console.warn("⚠️ Redis clear error:", err.message);
+    console.warn("⚠️ Redis delete failed:", err.message);
   }
 
   // ✅ EMIT SOCKET EVENT FOR GROUP CREATED
@@ -558,34 +533,13 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
       ...confirmedMembers.filter(id => String(id) !== String(creatorId))
     ];
 
-    // Format socket data to match group retrieval format
-    const socketGroupData = {
-      _id: String(group._id),
-      senderId: {
-        _id: creatorId,
-        firstname: creator.firstname,
-        lastname: creator.lastname,
-        email: creator.email,
-        profileimg: creator.profileimg || "/uploads/default.png",
-        isDeleted: false
-      },
-      receiverId: null,
-      chatType: "group",
-      name: group.name,
-      groupImage: group.groupImage,
-      members: enhancedMembers,
-      membersCount: enhancedMembers.length,
-      groupName: group.name || "Group",
-      createdAt: group.createdAt,
-      updatedAt: group.updatedAt
-    };
-
+    // Notify all group members about the new group
     allGroupMemberIds.forEach(memberId => {
       io.to(`user:${memberId}`).emit("chatList:update", {
         chatId: String(group._id),
         action: "groupCreated",
         type: "group",
-        groupData: socketGroupData
+        groupData: responseWithExtras
       });
       io.to(`user:${memberId}`).emit("chatRequests:update");
     });
@@ -595,18 +549,21 @@ export const createGroupViaJson = asyncHandler(async (req, res) => {
     console.error("Socket emit error (group created):", err.message);
   }
 
-  // ✅ Final response - matches group retrieval format
+  // ✅ Final response
   return successResponse(res, "Group created", responseWithExtras, null, 200, 1);
 });
 
 export const updateGroupByCreator = asyncHandler(async (req, res) => {
   const creatorId = req.user?.id;
-  const { groupId, memberIds = [] } = req.body; // Removed 'type' parameter
+  const { groupId, type, memberIds = [] } = req.body; // type: 'add' | 'remove'
 
   if (!creatorId) return errorResponse(res, "Unauthorized", 404);
   if (!groupId) return errorResponse(res, "groupId is required", 404);
-  if (!Array.isArray(memberIds)) {
-    return errorResponse(res, "memberIds must be an array", 404);
+  if (!type || !["add", "remove"].includes(type)) {
+    return errorResponse(res, "type must be 'add' or 'remove'", 404);
+  }
+  if (!Array.isArray(memberIds) || memberIds.length === 0) {
+    return errorResponse(res, "memberIds must be a non-empty array", 404);
   }
 
   // Validate MongoDB ObjectId
@@ -624,40 +581,15 @@ export const updateGroupByCreator = asyncHandler(async (req, res) => {
   const creator = await User.findById(creatorId).select("firstname lastname email");
   const creatorName = `${creator.firstname || ""} ${creator.lastname || ""}`.trim() || creator.email;
 
-  // ✅ Auto-filter: Remove creator, admins, and superAdmins from memberIds
-  const adminIds = new Set([
-    String(group.groupAdmin),
-    ...(group.superAdmins || []).map(String)
-  ]);
-
-  const filteredMemberIds = Array.from(new Set(memberIds.map(String)))
-    .filter(uid => !adminIds.has(uid)); // Exclude admins and creator
-
-  // ✅ Get current members (excluding admins)
-  const currentMembers = new Set(
-    (group.members || [])
-      .map(String)
-      .filter(uid => !adminIds.has(uid))
-  );
-
-  // ✅ Auto-detect: Determine who to add and who to remove
-  const newMemberIds = new Set(filteredMemberIds);
-
-  const toAdd = filteredMemberIds.filter(uid => !currentMembers.has(uid));
-  const toRemove = Array.from(currentMembers).filter(uid => !newMemberIds.has(uid));
-
-  // If nothing to do, return early
-  if (toAdd.length === 0 && toRemove.length === 0) {
-    return successResponse(res, "No changes to make", null, null, 200, 0);
+  const targetIds = Array.from(new Set(memberIds.map(String))).filter(uid => uid !== String(creatorId));
+  if (type === "add" && targetIds.includes(String(creatorId))) {
+    return successResponse(res, "You cannot add your own user", null, null, 200, 0);
   }
 
-  let addedUsers = [];
-  let removedUsers = [];
-
-  // ✅ Handle ADDITIONS
-  if (toAdd.length > 0) {
-    const users = await User.find({ _id: { $in: toAdd } }).select("_id firstname lastname email fcmToken isSubscription isAdmin");
-    if (users.length !== toAdd.length) {
+  // ✅ Add Members
+  if (type === "add") {
+    const users = await User.find({ _id: { $in: targetIds } }).select("_id firstname lastname email fcmToken isSubscription isAdmin");
+    if (users.length !== targetIds.length) {
       return successResponse(res, "One or more user ids not found", null, null, 200, 0);
     }
 
@@ -666,18 +598,25 @@ export const updateGroupByCreator = asyncHandler(async (req, res) => {
       return successResponse(res, "All members must have an active subscription.", null, null, 200, 0);
     }
 
+    const current = new Set((group.members || []).map(id => id.toString()));
+    const alreadyAdded = targetIds.filter(uid => current.has(uid));
+    if (alreadyAdded.length > 0) {
+      return successResponse(res, "Some users are already members", null, null, 200, 0);
+    }
+
     // Add new members
-    for (const uid of toAdd) currentMembers.add(uid);
-    addedUsers = users;
+    for (const uid of targetIds) current.add(uid);
+    group.members = Array.from(current);
+    await group.save();
 
     // ✅ Record join time for new members
     try {
       const joinedAtDate = new Date();
       const joinedAtUpdate = {};
-      toAdd.forEach(id => {
+      targetIds.forEach(id => {
         joinedAtUpdate[`joinedAtByUser.${String(id)}`] = joinedAtDate;
       });
-      const participantSet = new Set(Array.from(currentMembers).map(String));
+      const participantSet = new Set(Array.from(current).map(String));
       participantSet.add(String(group.groupAdmin));
       (group.superAdmins || []).forEach(id => participantSet.add(String(id)));
       await ChatConversation.findOneAndUpdate(
@@ -694,50 +633,112 @@ export const updateGroupByCreator = asyncHandler(async (req, res) => {
     } catch (err) {
       console.warn("⚠️ Failed to record join time for added members:", err.message);
     }
-  }
 
-  // ✅ Handle REMOVALS
-  if (toRemove.length > 0) {
-    removedUsers = await User.find({ _id: { $in: toRemove } })
-      .select("_id firstname lastname email fcmToken");
+    // ✅ EMIT SOCKET EVENT FOR GROUP MEMBER ADDED
+    try {
+      const io = getIO();
+      const allGroupMemberIds = [
+        String(group.groupAdmin),
+        ...(group.superAdmins || []).map(String),
+        ...Array.from(current)
+      ];
 
-    // Remove from currentMembers set
-    toRemove.forEach(uid => currentMembers.delete(uid));
-  }
-
-  // ✅ Update group members (Store ONLY regular members, exclude admins/creator)
-  // User requested to remove admin data from 'members' array
-  group.members = Array.from(currentMembers);
-
-  await group.save();
-
-
-  // ✅ EMIT SOCKET EVENTS
-  try {
-    const io = getIO();
-    const allGroupMemberIds = [
-      String(group.groupAdmin),
-      ...(group.superAdmins || []).map(String),
-      ...(group.members || []).map(String)
-    ];
-
-    // Notify all current group members about the update
-    if (toAdd.length > 0 || toRemove.length > 0) {
+      // Notify all group members about the update
       allGroupMemberIds.forEach(memberId => {
         io.to(`user:${memberId}`).emit("chatList:update", {
           chatId: String(group._id),
-          action: toAdd.length > 0 ? "membersAdded" : "membersRemoved",
+          action: "membersAdded",
           type: "group",
-          addedMemberIds: toAdd,
-          removedMemberIds: toRemove
+          addedMemberIds: targetIds
         });
         io.to(`user:${memberId}`).emit("chatRequests:update");
       });
+
+      console.log(`📡 Group member added socket events emitted for group ${group._id}`);
+    } catch (err) {
+      console.error("Socket emit error (group member added):", err.message);
     }
 
-    // Notify removed members
-    if (toRemove.length > 0) {
-      toRemove.forEach(removedId => {
+    // 🔔 Send notifications to newly added users
+    for (const user of users) {
+      try {
+        const title = "Added to Group";
+        const message = `${creatorName} added you to the group “${group.name || "Group"}”.`;
+
+        const notification = await Notification.create({
+          userId: user._id,
+          title,
+          message,
+          deeplink: "",
+        });
+
+        if (user.fcmToken) {
+          const pushResult = await sendFirebaseNotification(
+            user.fcmToken,
+            title,
+            message,
+            { type: "group_add", groupId: group._id.toString(), senderId: creatorId }
+          );
+
+          console.log(`💾 Notification saved to DB for added user ${user._id}: ${notification}`);
+
+          notification.firebaseStatus = pushResult.success ? "sent" : "failed";
+          await notification.save();
+
+          if (pushResult.success) {
+            console.log(`✅ Added-to-group notification sent to ${user.email}`);
+          } else {
+            console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
+            if (pushResult.error.includes("invalid-registration-token")) {
+              await User.findByIdAndUpdate(user._id, { $unset: { fcmToken: 1 } });
+            }
+          }
+        } else {
+          console.warn(`⚠️ No FCM token for ${user.email}, skipping push notification`);
+        }
+      } catch (err) {
+        console.error("❌ Error sending add notification:", err.message);
+      }
+    }
+  }
+
+  // ✅ Remove Members
+  if (type === "remove") {
+    const removeSet = new Set(targetIds);
+    const removedUsers = await User.find({ _id: { $in: Array.from(removeSet) } })
+      .select("_id firstname lastname email fcmToken");
+
+    group.members = (group.members || [])
+      .filter(m => !removeSet.has(m.toString()))
+      .filter(m => m.toString() !== String(creatorId));
+
+    group.superAdmins = (group.superAdmins || [])
+      .filter(a => a.toString() !== String(creatorId));
+
+    await group.save();
+
+    // ✅ EMIT SOCKET EVENT FOR GROUP MEMBER REMOVED
+    try {
+      const io = getIO();
+      const allGroupMemberIds = [
+        String(group.groupAdmin),
+        ...(group.superAdmins || []).map(String),
+        ...(group.members || []).map(String)
+      ];
+
+      // Notify remaining group members about the update
+      allGroupMemberIds.forEach(memberId => {
+        io.to(`user:${memberId}`).emit("chatList:update", {
+          chatId: String(group._id),
+          action: "membersRemoved",
+          type: "group",
+          removedMemberIds: targetIds
+        });
+        io.to(`user:${memberId}`).emit("chatRequests:update");
+      });
+
+      // Notify removed members
+      targetIds.forEach(removedId => {
         io.to(`user:${removedId}`).emit("chatList:update", {
           chatId: String(group._id),
           action: "removedFromGroup",
@@ -745,86 +746,52 @@ export const updateGroupByCreator = asyncHandler(async (req, res) => {
         });
         io.to(`user:${removedId}`).emit("chatRequests:update");
       });
+
+      console.log(`📡 Group member removed socket events emitted for group ${group._id}`);
+    } catch (err) {
+      console.error("Socket emit error (group member removed):", err.message);
     }
 
-    console.log(`📡 Group update socket events emitted for group ${group._id}`);
-  } catch (err) {
-    console.error("Socket emit error (group update):", err.message);
-  }
+    // 🔔 Notify removed users
+    for (const user of removedUsers) {
+      try {
+        const title = "Removed from Group";
+        const message = `You have been removed from the group “${group.name || "Group"}” by ${creatorName}.`;
 
-  // 🔔 Send notifications to newly added users
-  for (const user of addedUsers) {
-    try {
-      const title = "Added to Group";
-      const message = `${creatorName} added you to the group "${group.name || "Group"}".`;
-
-      const notification = await Notification.create({
-        userId: user._id,
-        title,
-        message,
-        deeplink: "",
-      });
-
-      if (user.fcmToken) {
-        const pushResult = await sendFirebaseNotification(
-          user.fcmToken,
+        const notification = await Notification.create({
+          userId: user._id,
           title,
           message,
-          { type: "group_add", chatId: group._id.toString(), senderId: creatorId }
-        );
+          deeplink: "",
+        });
 
-        notification.firebaseStatus = pushResult.success ? "sent" : "failed";
-        await notification.save();
+        console.log(`💾 Notification saved to DB for removed user ${user._id}: ${notification}`);
 
-        if (pushResult.success) {
-          console.log(`✅ Added-to-group notification sent to ${user.email}`);
-        } else {
-          console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
-          if (pushResult.error.includes("invalid-registration-token")) {
-            await User.findByIdAndUpdate(user._id, { $unset: { fcmToken: 1 } });
+        if (user.fcmToken) {
+          const pushResult = await sendFirebaseNotification(
+            user.fcmToken,
+            title,
+            message,
+            { type: "group_remove", groupId: group._id.toString(), senderId: creatorId }
+          );
+
+          notification.firebaseStatus = pushResult.success ? "sent" : "failed";
+          await notification.save();
+
+          if (pushResult.success) {
+            console.log(`✅ Removal notification sent to ${user.email}`);
+          } else {
+            console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
+            if (pushResult.error.includes("invalid-registration-token")) {
+              await User.findByIdAndUpdate(user._id, { $unset: { fcmToken: 1 } });
+            }
           }
-        }
-      }
-    } catch (err) {
-      console.error("❌ Error sending add notification:", err.message);
-    }
-  }
-
-  // 🔔 Notify removed users
-  for (const user of removedUsers) {
-    try {
-      const title = "Removed from Group";
-      const message = `You have been removed from the group "${group.name || "Group"}" by ${creatorName}.`;
-
-      const notification = await Notification.create({
-        userId: user._id,
-        title,
-        message,
-        deeplink: "",
-      });
-
-      if (user.fcmToken) {
-        const pushResult = await sendFirebaseNotification(
-          user.fcmToken,
-          title,
-          message,
-          { type: "group_remove", chatId: group._id.toString(), senderId: creatorId }
-        );
-
-        notification.firebaseStatus = pushResult.success ? "sent" : "failed";
-        await notification.save();
-
-        if (pushResult.success) {
-          console.log(`✅ Removal notification sent to ${user.email}`);
         } else {
-          console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
-          if (pushResult.error.includes("invalid-registration-token")) {
-            await User.findByIdAndUpdate(user._id, { $unset: { fcmToken: 1 } });
-          }
+          console.warn(`⚠️ No FCM token for ${user.email}, skipping push notification`);
         }
+      } catch (err) {
+        console.error("❌ Error sending removal notification:", err.message);
       }
-    } catch (err) {
-      console.error("❌ Error sending removal notification:", err.message);
     }
   }
 
@@ -836,82 +803,16 @@ export const updateGroupByCreator = asyncHandler(async (req, res) => {
 
   const creatorIdStr = populated.groupAdmin?._id?.toString();
   const adminIdSet = new Set((populated.superAdmins || []).map(a => a._id.toString()));
-
-  // ✅ Combine members and creator for display (Creator + Members)
-  let membersToDisplay = [...(populated.members || [])];
-  if (populated.groupAdmin) {
-    // Ensure creator is not duplicated
-    if (!membersToDisplay.some(m => String(m._id) === creatorIdStr)) {
-      membersToDisplay.unshift(populated.groupAdmin); // Add creator to the top
-    }
-  }
-
-  const filteredMembers = membersToDisplay.filter(m => {
+  const filteredMembers = (populated.members || []).filter(m => {
     const mid = m._id.toString();
-    // Exclude super admins, but ALLOW creator
-    return !adminIdSet.has(mid);
-  });
-
-  // ✅ Add userType to each member
-  const enhancedMembers = filteredMembers.map(member => {
-    const memberIdStr = String(member._id);
-    let userType = 'member'; // default
-
-    if (memberIdStr === creatorIdStr) {
-      userType = 'creator';
-    } else if (adminIdSet.has(memberIdStr)) {
-      userType = 'superAdmin';
-    }
-
-    return {
-      _id: member._id,
-      firstname: member.firstname,
-      lastname: member.lastname,
-      email: member.email,
-      profileimg: member.profileimg,
-      isDeleted: member.isDeleted || false,
-      userType: userType // ✅ ADDED: This identifies the role
-    };
+    return mid !== creatorIdStr && !adminIdSet.has(mid);
   });
 
   const responseData = populated.toObject();
-  responseData.members = enhancedMembers;
+  responseData.members = filteredMembers;
   delete responseData.messages;
 
-  // ✅ Clear Redis cache for all group members
-  try {
-    if (redisClient) {
-      const allGroupMemberIds = [
-        String(group.groupAdmin),
-        ...(group.superAdmins || []).map(String),
-        ...(group.members || []).map(String)
-      ];
-
-      const cacheKeys = [];
-      allGroupMemberIds.forEach(userId => {
-        cacheKeys.push(`requests:${String(userId)}:group:*`);
-        cacheKeys.push(`requests:${String(userId)}:accepted:*`);
-      });
-
-      // Use pattern matching to clear all related cache
-      await Promise.all(cacheKeys.map(pattern => deleteRedisKeysByPattern(pattern)));
-      console.log(`✅ Cache cleared for ${allGroupMemberIds.length} group members`);
-    }
-  } catch (err) {
-    console.warn("⚠️ Redis clear error in group update:", err.message);
-  }
-
-  // Build response message
-  let responseMessage = "Group updated successfully";
-  if (toAdd.length > 0 && toRemove.length > 0) {
-    responseMessage = `Group updated: ${toAdd.length} member(s) added, ${toRemove.length} member(s) removed`;
-  } else if (toAdd.length > 0) {
-    responseMessage = `Group updated: ${toAdd.length} member(s) added`;
-  } else if (toRemove.length > 0) {
-    responseMessage = `Group updated: ${toRemove.length} member(s) removed`;
-  }
-
-  return successResponse(res, responseMessage, responseData, null, 200, 1);
+  return successResponse(res, `Group ${type === "add" ? "updated (members added)" : "updated (members removed)"}`, responseData, null, 200, 1);
 });
 
 
@@ -971,29 +872,18 @@ export const deleteGroupByCreator = asyncHandler(async (req, res) => {
   }
 
   // Clear cache for all group members
-  // ✅ ENHANCED: Clear cache more aggressively after group updates
   try {
     const allGroupUserIds = [
       group.groupAdmin,
       ...(group.superAdmins || []),
       ...(group.members || [])
     ].map(String).filter(Boolean);
-
     const cacheKeys = allGroupUserIds.flatMap(uid => [
-      `requests:${uid}:group:*`,
-      `requests:${uid}:accepted:*`
+      `requests:${uid}:group`,
+      `requests:${uid}:accepted`
     ]);
-
-    await Promise.all([
-      ...cacheKeys.map(pattern => deleteRedisKeysByPattern(pattern)),
-      redisClient.del(allGroupUserIds.flatMap(uid => [
-        `requests:${uid}:group`,
-        `requests:${uid}:accepted`
-      ]))
-    ]);
-  } catch (err) {
-    console.warn("⚠️ Redis clear error:", err.message);
-  }
+    await redisClient.del(cacheKeys);
+  } catch { }
 
   return successResponse(res, "Group deleted", null, null, 200, 1);
 });

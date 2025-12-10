@@ -7,24 +7,10 @@ const groupMessageSchema = new Schema(
     sender: { type: Schema.Types.ObjectId, ref: "User", required: true },
     content: { type: String },
     mediaUrl: { type: String },
-    messageType: { type: String, enum: ["text", "image", "video"], default: "text" },
-    time: { type: String }
+    messageType: { type: String, enum: ["text", "image", "video"], default: "text" }
   },
-  { timestamps: { createdAt: true, updatedAt: false, currentTime: () => new Date()  } }
+  { timestamps: { createdAt: true, updatedAt: false } }
 );
-
-groupMessageSchema.pre('save', function(next) {
-  if (this.isNew) {
-    // Get current UTC time and format it as "HH:MM AM/PM"
-    this.time = new Date().toLocaleTimeString([], { 
-      hour: '2-digit', 
-      minute: '2-digit',
-      hour12: true,
-      timeZone: 'UTC'
-    });
-  }
-  next();
-});
 
 const chatRequestSchema = new Schema(
   {
@@ -45,11 +31,7 @@ const chatRequestSchema = new Schema(
     messages: [groupMessageSchema],
     isSystemGroup: { type: Boolean, default: false }
   },
-   { 
-    timestamps: { 
-      currentTime: () => new Date()
-    } 
-  }
+  { timestamps: true }
 );
 
 chatRequestSchema.index({ senderId: 1, receiverId: 1, chatType: 1, groupId: 1, status: 1 }, { name: "chat_request_compound_index" });

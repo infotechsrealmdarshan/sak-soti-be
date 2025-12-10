@@ -35,8 +35,6 @@ const conditionalPostMediaUpload = (req, res, next) => {
  *   get:
  *     summary: Get all posts (public)
  *     tags: [Posts]
- *     security:
- *       - bearerAuth: []
  *     parameters:
  *       - in: query
  *         name: page
@@ -76,7 +74,7 @@ const conditionalPostMediaUpload = (req, res, next) => {
  *       200:
  *         description: Posts retrieved successfully
  */
-router.get("/", auth, getAllPosts);
+router.get("/", getAllPosts);
 
 /**
  * @swagger
@@ -84,8 +82,6 @@ router.get("/", auth, getAllPosts);
  *   get:
  *     summary: Get post by ID (public)
  *     tags: [Posts]
- *     security:
- *       - bearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -100,7 +96,7 @@ router.get("/", auth, getAllPosts);
  *       404:
  *         description: API logic issue
  */
-router.get("/:id", auth, adminOnly, getPostById);
+router.get("/:id", getPostById);
 
 // Authenticated routes (users or admins)
 
@@ -144,6 +140,7 @@ router.get("/:id", auth, adminOnly, getPostById);
  */
 router.post("/", auth, createPost);
 
+
 /**
  * @swagger
  * /api/post/{id}:
@@ -161,6 +158,7 @@ router.post("/", auth, createPost);
  *         description: Post ID
  *         example: 6900581abc67d4e7b7fe91cf
  *     requestBody:
+ *      
  *       content:
  *         multipart/form-data:
  *           schema:
@@ -242,5 +240,8 @@ router.delete("/bulk-delete", auth, adminOnly, bulkDeletePosts);
  *         description: API logic issue - token missing or invalid / Post not found
  */
 router.delete("/:id", auth, ownerOrAdmin, deletePost);
+
+
+
 
 export default router;
