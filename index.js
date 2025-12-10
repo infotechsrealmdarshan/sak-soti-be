@@ -20,6 +20,7 @@ import contactRoutes from "./routes/contactRoutes.js"
 import notificationRoutes from "./routes/notificationRoutes.js";
 import stripeRoutes from "./routes/stripeRoutes.js";
 import { stripeWebhook } from "./controller/stripeController.js";
+import lotteryRoutes from "./routes/lotteryRoutes.js";
 
 dotenv.config();
 const app = express();
@@ -93,6 +94,7 @@ app.use("/api/terms", termRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/notification", notificationRoutes);
 app.use("/api/subscription", stripeRoutes);
+app.use("/api/lottery", lotteryRoutes);
 
 // ✅ Subscription cron (disabled on Vercel)
 // if (process.env.VERCEL !== "1") {

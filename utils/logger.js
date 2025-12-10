@@ -3,11 +3,14 @@
  */
 
 const logger = {
+    enabled: false, // 🔥 turn this ON/OFF to show or hide all logs
+
     /**
      * Log informational messages
      * @param  {...any} args - Arguments to log
      */
     log: (...args) => {
+        if (!logger.enabled) return;
         console.log(...args);
     },
 
@@ -16,6 +19,7 @@ const logger = {
      * @param  {...any} args - Arguments to log
      */
     error: (...args) => {
+        if (!logger.enabled) return;
         console.error(...args);
     },
 
@@ -24,6 +28,7 @@ const logger = {
      * @param  {...any} args - Arguments to log
      */
     warn: (...args) => {
+        if (!logger.enabled) return;
         console.warn(...args);
     },
 
@@ -32,6 +37,7 @@ const logger = {
      * @param  {...any} args - Arguments to log
      */
     info: (...args) => {
+        if (!logger.enabled) return;
         console.info(...args);
     },
 
@@ -40,6 +46,7 @@ const logger = {
      * @param  {...any} args - Arguments to log
      */
     debug: (...args) => {
+        if (!logger.enabled) return;
         console.debug(...args);
     },
 };
