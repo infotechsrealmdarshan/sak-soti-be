@@ -4,29 +4,43 @@ import redisClient from "../../config/redis.js";
 import User from "../../models/User.js";
 import mongoose from "mongoose";
 import { asyncHandler } from "../../utils/errorHandler.js";
-import { formatMessageTimestamp } from "../../utils/time.js";
 import { successResponse, errorResponse } from "../../utils/response.js";
 import { getIO } from "../../config/socket.js";
-import { sendFirebaseNotification } from "../../utils/firebaseHelper.js";
+import { isValidFCMToken, sendFirebaseNotification } from "../../utils/firebaseHelper.js";
 import Notification from "../../models/Notification.js";
-import { checkUserDeleted } from "../../utils/chatHelper.js";
+import {
+  createMessageResponse,
+  createDeletedForMeMap
+} from "../../utils/messageUtils.js";
+import logger from "../../utils/logger.js";
 
-// Minimal in-memory websocket-like message save via HTTP for individual chats
+const deleteRedisKeysByPattern = async (pattern) => {
+  if (!redisClient || typeof redisClient.scan !== "function") return;
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, keys] = await redisClient.scan(cursor, "MATCH", pattern, "COUNT", 50);
+      cursor = nextCursor;
+      if (Array.isArray(keys) && keys.length > 0) {
+        await redisClient.del(...keys);
+      }
+    } while (cursor !== "0");
+  } catch (err) {
+    logger.warn(`Redis delete failed for pattern ${pattern}:`, err.message);
+  }
+};
+
 export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
-  const { chatId } = req.params; // ChatRequest ID
+  const { chatId } = req.params;
   const userId = req.user?.id;
   const { message } = req.body;
   if (!message || !message.trim()) return errorResponse(res, "message is required", 404);
 
-  // Validate MongoDB ObjectId format
   if (!mongoose.Types.ObjectId.isValid(chatId)) {
-    // Invalid ID format - return 200 with status 0 (API worked, but chat not found)
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
-  // Resolve ChatRequest → participants, must be accepted individual
   const request = await ChatRequest.findById(chatId);
-  // Chat not found - return 200 with status 0 (API worked, but chat not found)
   if (!request) {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
@@ -36,32 +50,25 @@ export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
   const participants = [request.senderId.toString(), request.receiverId.toString()];
   if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
-  // ✅ Check if partner user is deleted
-  const partnerId = String(request.senderId) === String(userId)
-    ? request.receiverId
-    : request.senderId;
+  const partnerId = String(request.senderId) === String(userId) ? request.receiverId : request.senderId;
   const partner = await User.findById(partnerId).select("isDeleted");
   const isPartnerDeleted = partner && partner.isDeleted === true;
 
-  // Upsert to ChatConversation instead of IndividualChat
+  const participantsSet = new Set([request.senderId.toString(), request.receiverId.toString()]);
   const convo = await ChatConversation.findOneAndUpdate(
     { chatRequestId: request._id },
     {
       $setOnInsert: { chatType: 'individual' },
-      $set: { participants },
+      $set: { participants: Array.from(participantsSet) },
       $push: { messages: { sender: userId, content: message, messageType: 'text' } }
     },
     { upsert: true, new: true }
   ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
-  const last = convo.messages[convo.messages.length - 1];
-  const ts = formatMessageTimestamp(last.createdAt || Date.now());
-  const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
-  // ✅ Handle deleted users in sender info
-  // If partner is deleted, show "Profile Deleted" as sender info
+  const last = convo.messages[convo.messages.length - 1];
+
   let senderInfo;
   if (isPartnerDeleted) {
-    // Partner is deleted, show deleted account details
     senderInfo = {
       _id: String(userId),
       firstname: "Profile",
@@ -70,90 +77,56 @@ export const sendIndividualTextMessage = asyncHandler(async (req, res) => {
       profileimg: "/uploads/default.png",
       isDeleted: true
     };
-  } else if (last.sender?._id) {
-    if (last.sender.isDeleted === true) {
-      senderInfo = {
-        _id: String(last.sender._id),
-        firstname: "Profile",
-        lastname: "Deleted",
-        email: "",
-        profileimg: "/uploads/default.png",
-        isDeleted: true
-      };
-    } else {
-      senderInfo = {
-        _id: String(last.sender._id),
-        firstname: last.sender.firstname,
-        lastname: last.sender.lastname,
-        email: last.sender.email,
-        profileimg: last.sender.profileimg
-      };
-    }
   } else {
-    senderInfo = {
-      _id: String(userId)
-    };
+    senderInfo = last.sender?._id ? {
+      _id: String(last.sender._id),
+      firstname: last.sender.firstname,
+      lastname: last.sender.lastname,
+      email: last.sender.email,
+      profileimg: last.sender.profileimg
+    } : { _id: String(userId) };
   }
-  const messageData = {
-    messageId: String(last._id),
-    chatRequestId: chatId,
-    content: last.content,
-    mediaUrl: last.mediaUrl || null,
-    messageType: last.messageType || 'text',
-    createdAt: last.createdAt,
-    time: displayTime,
-    sender: senderInfo,
-    type: 'send'
-  };
 
-  // Emit socket event to chat room for real-time notifications
+  const messageData = createMessageResponse(
+    { ...last.toObject(), sender: senderInfo },
+    userId,
+    chatId
+  );
+  messageData.type = 'send';
+
   try {
     const io = getIO();
-
-    // Emit to chat room (clients subscribed via GET will receive)
-    io.to(`chat:${chatId}`).emit("newMessage", {
-      ...messageData,
-      chatId: String(chatId),
-      type: 'receive',
-      sender: senderInfo
-    });
+    const socketMessage = { ...messageData, type: 'receive' };
+    io.to(`chat:${chatId}`).emit("newMessage", socketMessage);
   } catch (error) {
-    console.error("Socket emit error:", error.message);
+    logger.error("Socket emit error:", error.message);
   }
 
   return successResponse(res, "Message sent", messageData, null, 200);
 });
 
-// Unified message sender for individual and group
 export const sendChatMessage = asyncHandler(async (req, res) => {
-  const { chatId } = req.params; // ChatRequest ID (individual accepted request or group root/invite)
+  const { chatId } = req.params;
   const userId = req.user?.id;
   const { message } = req.body;
   if (!message || !message.trim()) return errorResponse(res, "message is required", 404);
 
-  // Validate MongoDB ObjectId format
   if (!mongoose.Types.ObjectId.isValid(chatId)) {
-    // Invalid ID format - return 200 with status 0 (API worked, but chat id not found)
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
   const reqDoc = await ChatRequest.findById(chatId);
-  // Chat not found - return 200 with status 0 (API worked, but chat id not found)
   if (!reqDoc) {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
-  // Individual chat flow (must be accepted and participant)
   if (reqDoc.chatType === 'individual') {
     if (reqDoc.status !== 'accepted') return successResponse(res, "Chat request not accepted yet", null, null, 200, 0);
 
     const participants = [reqDoc.senderId.toString(), reqDoc.receiverId.toString()];
     if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
-    // ✅ Check if partner user is deleted
-    const partnerId = String(reqDoc.senderId) === String(userId)
-      ? reqDoc.receiverId
-      : reqDoc.senderId;
+    const partnerId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
     const partner = await User.findById(partnerId).select("isDeleted");
     const isPartnerDeleted = partner && partner.isDeleted === true;
 
@@ -168,15 +141,18 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
       { upsert: true, new: true }
     ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
 
-    const last = convo.messages[convo.messages.length - 1];
-    const ts = formatMessageTimestamp(last.createdAt || Date.now());
-    const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
+    // ✅ Update ChatRequest's updatedAt for proper sorting in chat list
+    try {
+      reqDoc.updatedAt = new Date();
+      await reqDoc.save();
+    } catch (err) {
+      logger.warn("Failed to update chat request timestamp:", err.message);
+    }
 
-    // ✅ Handle deleted users in sender info
-    // If partner is deleted, show "Profile Deleted" as sender info
+    const last = convo.messages[convo.messages.length - 1];
+
     let senderInfo;
     if (isPartnerDeleted) {
-      // Partner is deleted, show deleted account details
       senderInfo = {
         _id: String(userId),
         firstname: "Profile",
@@ -185,75 +161,31 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
         profileimg: "/uploads/default.png",
         isDeleted: true
       };
-    } else if (last.sender?._id) {
-      if (last.sender.isDeleted === true) {
-        senderInfo = {
-          _id: String(last.sender._id),
-          firstname: "Profile",
-          lastname: "Deleted",
-          email: "",
-          profileimg: "/uploads/default.png",
-          isDeleted: true
-        };
-      } else {
-        senderInfo = {
-          _id: String(last.sender._id),
-          firstname: last.sender.firstname,
-          lastname: last.sender.lastname,
-          email: last.sender.email,
-          profileimg: last.sender.profileimg
-        };
-      }
     } else {
-      senderInfo = {
-        _id: String(userId)
-      };
+      senderInfo = last.sender?._id ? {
+        _id: String(last.sender._id),
+        firstname: last.sender.firstname,
+        lastname: last.sender.lastname,
+        email: last.sender.email,
+        profileimg: last.sender.profileimg
+      } : { _id: String(userId) };
     }
-    const baseMessageData = {
-      messageId: String(last._id),
-      chatRequestId: chatId,
-      content: last.content,
-      mediaUrl: last.mediaUrl || null,
-      messageType: last.messageType || 'text',
-      createdAt: last.createdAt,
-      time: displayTime,
-      sender: senderInfo
-    };
+
+    const baseMessageData = createMessageResponse(
+      { ...last.toObject(), sender: senderInfo },
+      userId,
+      chatId
+    );
+
     const senderChatListMessage = { ...baseMessageData, type: 'send' };
     const receiverChatListMessage = { ...baseMessageData, type: 'receive' };
 
-    // ✅ EMIT SOCKET EVENT TO CHAT ROOM
     try {
       const io = getIO();
+      io.to(`chat:${String(chatId)}`).emit("newMessage", receiverChatListMessage);
 
-      // Emit to chat room (both participants will receive)
-      io.to(`chat:${chatId}`).emit("newMessage", {
-        ...baseMessageData,
-        chatId: String(chatId),
-        type: 'receive',
-        sender: senderInfo
-      });
+      const otherUserId = String(reqDoc.senderId) === String(userId) ? String(reqDoc.receiverId) : String(reqDoc.senderId);
 
-      // ✅ Stop typing indicator when message is sent
-      io.to(`chat:${chatId}`).emit("userTyping", {
-        chatId: String(chatId),
-        userId: String(userId),
-        isTyping: false
-      });
-
-      console.log(`📨 Message sent to individual chat room: chat:${chatId}`);
-    } catch (error) {
-      console.error("Socket emit error (individual chat):", error.message);
-    }
-
-    // ✅ EMIT SOCKET EVENT TO UPDATE CHAT LIST FOR BOTH USERS
-    try {
-      const io = getIO();
-      const otherUserId = String(reqDoc.senderId) === String(userId)
-        ? String(reqDoc.receiverId)
-        : String(reqDoc.senderId);
-
-      // Notify both users to refresh their chat list
       io.to(`user:${userId}`).emit("chatList:update", {
         chatId: String(chatId),
         action: "newMessage",
@@ -266,86 +198,86 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
         lastMessage: receiverChatListMessage
       });
 
-      console.log(`🔔 Chat list update sent to both users`);
     } catch (error) {
-      console.error("Socket emit error (chat list update):", error.message);
+      logger.error("Socket emit error:", error.message);
     }
 
+    // ✅ UPDATED: Send Push Notifications with token validation
     try {
       const sender = await User.findById(userId).select("firstname lastname email");
-      const receiverId =
-        String(reqDoc.senderId) === String(userId)
-          ? reqDoc.receiverId
-          : reqDoc.senderId;
+      const receiverId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
       const receiver = await User.findById(receiverId).select("firstname lastname email fcmToken");
 
       if (receiver) {
         const senderName = `${sender.firstname || ""} ${sender.lastname || ""}`.trim() || sender.email;
-
         const title = "New Message Received";
         const body = `${senderName}: ${message}`;
 
-        // Save to Notification DB
         const notification = await Notification.create({
           userId: receiver._id,
           title,
           message: body,
           deeplink: "",
+          chatId: chatId.toString()
         });
 
-        console.log(`💾 Notification saved to DB for user ${receiver._id}: ${notification}`);
+        logger.log(`📱 Text notification created for user: ${receiver.email}`);
 
-        if (receiver.fcmToken) {
+        // ✅ IMPROVED: Validate token before sending
+        if (receiver.fcmToken && isValidFCMToken(receiver.fcmToken)) {
+          logger.log(`✅ Valid FCM token found for ${receiver.email}, sending notification...`);
+
           const pushResult = await sendFirebaseNotification(
             receiver.fcmToken,
             title,
             body,
-            { type: "chat_message", senderId: userId.toString(), deeplink: "" }
+            { type: "chat_message", senderId: userId.toString(), deeplink: "", chatId: chatId.toString() }
           );
 
           notification.firebaseStatus = pushResult.success ? "sent" : "failed";
           await notification.save();
-
+          logger.log(`✅ Firebase notification sent successfully to ${notification}`);
           if (pushResult.success) {
-            console.log(`✅ Push notification sent to ${receiver.email}`);
+            logger.log(`✅ Firebase notification sent successfully to ${pushResult}`);
           } else {
-            console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
-            if (pushResult.error?.includes("invalid-registration-token")) {
+            logger.error(`⚠️ Firebase send failed: ${pushResult.error}`);
+
+            // Auto-clean invalid tokens
+            if (pushResult.error?.includes("invalid-registration-token") ||
+              pushResult.error?.includes("not-registered")) {
+              logger.log(`🔄 Removing invalid FCM token for user ${receiver.email}`);
               await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
             }
           }
         } else {
-          console.warn(`⚠️ Receiver has no FCM token`);
+          logger.warn(`⚠️ Invalid or missing FCM token for ${receiver.email}, skipping push notification`);
+          notification.firebaseStatus = "skipped_invalid_token";
+          await notification.save();
         }
       }
     } catch (err) {
-      console.error("❌ Error sending chat push notification:", err.message);
+      logger.error("❌ Error sending chat notification:", err.message);
     }
 
-    // Clear cache for both users
     try {
-      await redisClient.del([
+      await redisClient.del(
         `chat:${String(reqDoc._id)}`,
         `requests:${String(reqDoc.senderId)}:accepted`,
         `requests:${String(reqDoc.receiverId)}:accepted`
-      ]);
+      );
     } catch { }
 
     return successResponse(res, 'Message sent', senderChatListMessage, null, 200, 1);
   }
 
-  // Group chat flow: find root (receiverId=null)
   let groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({ _id: reqDoc.groupId, chatType: 'group', receiverId: null });
   if (!groupRoot) return successResponse(res, 'Group id not found', null, null, 200, 0);
 
-  // Only groupAdmin, superAdmins, or members can post
   const isParticipant = String(groupRoot.groupAdmin) === String(userId)
     || (groupRoot.superAdmins || []).map(String).includes(String(userId))
     || (groupRoot.members || []).map(String).includes(String(userId));
   if (!isParticipant) return successResponse(res, 'You are not a member of this group', null, null, 200, 0);
 
-  // Persist message in unified ChatMessage collection
-  // Upsert conversation doc for group
   const participants = [groupRoot.groupAdmin, ...(groupRoot.superAdmins || []), ...(groupRoot.members || [])].map(String);
   const uniqueParticipants = Array.from(new Set(participants));
   const convo = await ChatConversation.findOneAndUpdate(
@@ -357,100 +289,50 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
     },
     { upsert: true, new: true }
   ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
-  // Bump group root updatedAt so group lists sort with newest message first
+
   try {
     groupRoot.updatedAt = new Date();
     await groupRoot.save();
   } catch { }
+
   const last = convo.messages[convo.messages.length - 1];
-  const ts = formatMessageTimestamp(last.createdAt || Date.now());
-  const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
-  // ✅ Handle deleted users in sender info
-  let senderInfo;
-  if (last.sender?._id) {
-    if (last.sender.isDeleted === true) {
-      senderInfo = {
-        _id: String(last.sender._id),
-        firstname: "Profile",
-        lastname: "Deleted",
-        email: "",
-        profileimg: "/uploads/default.png",
-        isDeleted: true
-      };
-    } else {
-      senderInfo = {
-        _id: String(last.sender._id),
-        firstname: last.sender.firstname,
-        lastname: last.sender.lastname,
-        email: last.sender.email,
-        profileimg: last.sender.profileimg
-      };
-    }
-  } else {
-    senderInfo = {
-      _id: String(userId)
-    };
-  }
-  const baseGroupMessage = {
-    messageId: String(last._id),
-    chatRequestId: String(groupRoot._id),
-    content: last.content,
-    mediaUrl: last.mediaUrl || null,
-    messageType: last.messageType || 'text',
-    createdAt: last.createdAt,
-    time: displayTime,
-    sender: senderInfo
-  };
+  const baseGroupMessage = createMessageResponse(last, userId, groupRoot._id);
+  const responseMessage = { ...baseGroupMessage, type: 'send' };
 
-  // Emit socket event to chat room for real-time notifications
   try {
     const io = getIO();
+    const socketMessage = { ...baseGroupMessage, type: 'receive' };
+    io.to(`chat:${String(groupRoot._id)}`).emit("newMessage", socketMessage);
 
-    // Emit to chat room (clients subscribed via GET will receive)
-    io.to(`chat:${String(groupRoot._id)}`).emit("newMessage", {
-      ...baseGroupMessage,
-      chatId: String(groupRoot._id),
-      type: 'receive',
-      sender: senderInfo
-    });
-
-    // ✅ Stop typing indicator when message is sent (for groups)
     io.to(`chat:${String(groupRoot._id)}`).emit("userTyping", {
       chatId: String(groupRoot._id),
       userId: String(userId),
       isTyping: false
     });
 
-    // ✅ EMIT SOCKET EVENT TO UPDATE CHAT LIST FOR ALL GROUP MEMBERS
     const allGroupMemberIds = [
       String(groupRoot.groupAdmin),
       ...(groupRoot.superAdmins || []).map(String),
       ...(groupRoot.members || []).map(String)
-    ].filter(id => id !== String(userId));
+    ];
 
-    allGroupMemberIds.forEach(memberId => {
+    const uniqueGroupMemberIds = Array.from(new Set(allGroupMemberIds));
+
+    uniqueGroupMemberIds.forEach(memberId => {
+      const messageType = String(memberId) === String(userId) ? 'send' : 'receive';
       io.to(`user:${memberId}`).emit("chatList:update", {
         chatId: String(groupRoot._id),
         action: "newMessage",
-        lastMessage: { ...baseGroupMessage, type: 'receive' },
-        type: "group"
+        lastMessage: { ...baseGroupMessage, type: messageType }
       });
     });
 
-    // Also emit to sender
-    io.to(`user:${userId}`).emit("chatList:update", {
-      chatId: String(groupRoot._id),
-      action: "newMessage",
-      lastMessage: { ...baseGroupMessage, type: 'send' },
-      type: "group"
-    });
-
-    console.log(`🔔 Chat list update sent to all group members for group ${groupRoot._id}`);
   } catch (error) {
-    console.error("Socket emit error:", error.message);
+    logger.error("Socket emit error:", error.message);
   }
 
+  // ✅ UPDATED: Group notification with token validation
   try {
     const sender = await User.findById(userId).select("firstname lastname email");
     const senderName = `${sender.firstname || ""} ${sender.lastname || ""}`.trim() || sender.email;
@@ -462,73 +344,107 @@ export const sendChatMessage = asyncHandler(async (req, res) => {
       _id: { $in: uniqueParticipants.filter((id) => id !== String(userId)) },
     }).select("fcmToken email");
 
+    logger.log(`📢 Sending group notifications to ${receivers.length} members`);
+
     for (const receiver of receivers) {
-      const notification = await Notification.create({
-        userId: receiver._id,
-        title,
-        message: body,
-        deeplink: "",
-      });
-
-      console.log(`💾 Notification saved to DB for group member ${receiver._id}: ${notification}`);
-
-      if (receiver.fcmToken) {
-        const pushResult = await sendFirebaseNotification(
-          receiver.fcmToken,
+      try {
+        const notification = await Notification.create({
+          userId: receiver._id,
           title,
-          body,
-          { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString() }
-        );
+          message: body,
+          deeplink: "",
+          chatId: chatId.toString(),
+        });
 
-        notification.firebaseStatus = pushResult.success ? "sent" : "failed";
-        await notification.save();
+        // ✅ IMPROVED: Validate token before sending
+        if (receiver.fcmToken && isValidFCMToken(receiver.fcmToken)) {
+          logger.log(`✅ Valid FCM token for ${receiver.email}, sending...`);
 
-        if (pushResult.success)
-          console.log(`✅ Push sent to group member ${receiver.email}`);
-        else
-          console.error(`⚠️ Firebase failed for ${receiver.email}: ${pushResult.error}`);
+          const pushResult = await sendFirebaseNotification(
+            receiver.fcmToken,
+            title,
+            body,
+            { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString(), chatId: groupRoot._id.toString() }
+          );
+
+          notification.firebaseStatus = pushResult.success ? "sent" : "failed";
+          await notification.save();
+
+          if (!pushResult.success) {
+            logger.warn(`⚠️ Failed to send to ${receiver.email}: ${pushResult.error}`);
+
+            // Auto-clean invalid tokens
+            if (pushResult.error?.includes("invalid-registration-token") ||
+              pushResult.error?.includes("not-registered") ||
+              pushResult.error?.includes("Requested entity was not found")) {  // ✅ Add this condition
+              logger.log(`🔄 Removing invalid FCM token for user ${receiver.email}`);
+              await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
+            }
+          }
+        } else {
+          logger.warn(`⚠️ Invalid or missing FCM token for ${receiver.email}, skipping`);
+          notification.firebaseStatus = "skipped_invalid_token";
+          await notification.save();
+        }
+      } catch (err) {
+        logger.error(`❌ Error sending notification to ${receiver.email}:`, err.message);
       }
     }
   } catch (err) {
-    console.error("❌ Error sending group notification:", err.message);
+    logger.error("❌ Error sending group notification:", err.message);
   }
 
-  try { await redisClient.del([`chat:${String(groupRoot._id)}`]); } catch { }
-  return successResponse(res, 'Message sent', { ...baseGroupMessage, type: 'send' }, null, 200, 1);
+  try {
+    await redisClient.del(`chat:${String(groupRoot._id)}`);
+  } catch { }
+
+  try {
+    const cacheClearTargets = [
+      String(groupRoot.groupAdmin),
+      ...(groupRoot.superAdmins || []).map(String),
+      ...(groupRoot.members || []).map(String)
+    ];
+    const uniqueTargets = Array.from(new Set(cacheClearTargets));
+    await Promise.all(uniqueTargets.map(async (uid) => {
+      await deleteRedisKeysByPattern(`requests:${uid}:group*`);
+      await deleteRedisKeysByPattern(`requests:${uid}:accepted*`);
+    }));
+  } catch (err) {
+    logger.warn("Redis group cache clear failed:", err.message);
+  }
+
+  return successResponse(res, 'Message sent', responseMessage, null, 200, 1);
 });
 
-// POST /api/chat/:chatId/media (image|video|audio|pdf) – 10MB images, 50MB video, 20MB audio, 10MB pdf
 export const uploadChatMedia = asyncHandler(async (req, res) => {
   const { chatId } = req.params;
   const userId = req.user?.id;
 
-  // Validate MongoDB ObjectId format
   if (!mongoose.Types.ObjectId.isValid(chatId)) {
-    // Invalid ID format - return 200 with status 0 (API worked, but chat id not found)
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
   const reqDoc = await ChatRequest.findById(chatId);
-  // Chat not found - return 200 with status 0 (API worked, but chat id not found)
   if (!reqDoc) {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
-  // ✅ Check if partner user is deleted (for individual chats)
   let isPartnerDeleted = false;
+  let partnerId = null;
+  let isGroup = false;
+  let groupRoot = null;
+
   if (reqDoc.chatType === 'individual') {
     if (reqDoc.status !== 'accepted') return successResponse(res, "Chat request not accepted yet", null, null, 200, 0);
     const participants = [reqDoc.senderId.toString(), reqDoc.receiverId.toString()];
     if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
-    // Check if partner user is deleted
-    const partnerId = String(reqDoc.senderId) === String(userId)
-      ? reqDoc.receiverId
-      : reqDoc.senderId;
+    partnerId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
     const partner = await User.findById(partnerId).select("isDeleted");
     isPartnerDeleted = partner && partner.isDeleted === true;
   } else {
-    const groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({ _id: reqDoc.groupId, chatType: 'group', receiverId: null });
+    isGroup = true;
+    groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({ _id: reqDoc.groupId, chatType: 'group', receiverId: null });
     if (!groupRoot) return successResponse(res, "Group id not found", null, null, 200, 0);
     const isParticipant = String(groupRoot.groupAdmin) === String(userId)
       || (groupRoot.superAdmins || []).map(String).includes(String(userId))
@@ -545,11 +461,10 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
   else if (["mp3", "wav", "aac", "m4a", "ogg"].includes(ext)) messageType = 'audio';
   else if (["pdf"].includes(ext)) messageType = 'pdf';
 
-  // Upsert conversation and push media message
   const chatKeyId = reqDoc.chatType === 'group' && reqDoc.receiverId !== null ? reqDoc.groupId : reqDoc._id;
   const participants = reqDoc.chatType === 'individual'
     ? [reqDoc.senderId.toString(), reqDoc.receiverId.toString()]
-    : undefined; // we do not recompute group participants here
+    : undefined;
 
   const update = {
     $setOnInsert: { chatType: reqDoc.chatType },
@@ -564,14 +479,9 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
   ).populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
 
   const last = convo.messages[convo.messages.length - 1];
-  const ts = formatMessageTimestamp(last.createdAt || Date.now());
-  const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
 
-  // ✅ Handle deleted users in sender info
-  // If partner is deleted (for individual chats), show "Profile Deleted" as sender info
   let senderInfo;
   if (reqDoc.chatType === 'individual' && isPartnerDeleted) {
-    // Partner is deleted, show deleted account details
     senderInfo = {
       _id: String(userId),
       firstname: "Profile",
@@ -580,89 +490,54 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
       profileimg: "/uploads/default.png",
       isDeleted: true
     };
-  } else if (last.sender?._id) {
-    if (last.sender.isDeleted === true) {
-      senderInfo = {
-        _id: String(last.sender._id),
-        firstname: "Profile",
-        lastname: "Deleted",
-        email: "",
-        profileimg: "/uploads/default.png",
-        isDeleted: true
-      };
-    } else {
-      senderInfo = {
-        _id: String(last.sender._id),
-        firstname: last.sender.firstname,
-        lastname: last.sender.lastname,
-        email: last.sender.email,
-        profileimg: last.sender.profileimg
-      };
-    }
   } else {
-    senderInfo = {
-      _id: String(userId)
-    };
+    senderInfo = last.sender?._id ? {
+      _id: String(last.sender._id),
+      firstname: last.sender.firstname,
+      lastname: last.sender.lastname,
+      email: last.sender.email,
+      profileimg: last.sender.profileimg
+    } : { _id: String(userId) };
   }
-  const baseMessageData = {
-    messageId: String(last._id),
-    chatRequestId: String(chatKeyId),
-    content: last.content,
-    mediaUrl: last.mediaUrl,
-    messageType: last.messageType,
-    createdAt: last.createdAt,
-    time: displayTime,
-    sender: senderInfo
-  };
 
-  // Emit socket event to chat room for real-time notifications
+  const baseMessageData = createMessageResponse(
+    { ...last.toObject(), sender: senderInfo },
+    userId,
+    chatKeyId
+  );
+  const responseMessage = { ...baseMessageData, type: 'send' };
+
   try {
     const io = getIO();
+    const socketMessage = { ...baseMessageData, type: 'receive' };
+    io.to(`chat:${String(chatKeyId)}`).emit("newMessage", socketMessage);
 
-    // Emit to chat room (clients subscribed via GET will receive)
-    io.to(`chat:${String(chatKeyId)}`).emit("newMessage", {
-      ...baseMessageData,
-      chatId: String(chatKeyId),
-      type: 'receive',
-      sender: senderInfo
-    });
-
-    // ✅ Stop typing indicator when media message is sent
     io.to(`chat:${String(chatKeyId)}`).emit("userTyping", {
       chatId: String(chatKeyId),
       userId: String(userId),
       isTyping: false
     });
 
-    // ✅ EMIT SOCKET EVENT TO UPDATE CHAT LIST FOR MEDIA MESSAGES
     if (reqDoc.chatType === "individual") {
-      const otherUserId =
-        String(reqDoc.senderId) === String(userId)
-          ? reqDoc.receiverId
-          : reqDoc.senderId;
+      const otherUserId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
 
       io.to(`user:${userId}`).emit("chatList:update", {
         chatId: String(chatKeyId),
         action: "newMessage",
-        lastMessage: { ...baseMessageData, type: 'send' },
-        type: "individual"
+        lastMessage: responseMessage
       });
 
       io.to(`user:${otherUserId}`).emit("chatList:update", {
         chatId: String(chatKeyId),
         action: "newMessage",
-        lastMessage: { ...baseMessageData, type: 'receive' },
-        type: "individual"
+        lastMessage: socketMessage
       });
     } else if (reqDoc.chatType === "group") {
-      const groupRoot =
-        reqDoc.receiverId === null
-          ? reqDoc
-          : await ChatRequest.findOne({
-            _id: reqDoc.groupId,
-            chatType: "group",
-            receiverId: null,
-          }).select("members superAdmins groupAdmin");
+      const groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({
+        _id: reqDoc.groupId,
+        chatType: "group",
+        receiverId: null,
+      }).select("members superAdmins groupAdmin");
 
       if (groupRoot) {
         const allGroupMemberIds = [
@@ -675,178 +550,152 @@ export const uploadChatMedia = asyncHandler(async (req, res) => {
           io.to(`user:${memberId}`).emit("chatList:update", {
             chatId: String(chatKeyId),
             action: "newMessage",
-            lastMessage: { ...baseMessageData, type: 'receive' },
-            type: "group"
+            lastMessage: socketMessage
           });
         });
 
         io.to(`user:${userId}`).emit("chatList:update", {
           chatId: String(chatKeyId),
           action: "newMessage",
-          lastMessage: { ...baseMessageData, type: 'send' },
-          type: "group"
+          lastMessage: responseMessage
         });
       }
     }
   } catch (error) {
-    console.error("Socket emit error:", error.message);
+    logger.error("Socket emit error:", error.message);
   }
 
-  // ✅ PUSH & DB NOTIFICATION (Individual or Group)
+  // ✅ ADDED: Send Push Notifications
   try {
     const sender = await User.findById(userId).select("firstname lastname email");
     const senderName = `${sender.firstname || ""} ${sender.lastname || ""}`.trim() || sender.email;
-    const io = getIO();
 
-    let title = "";
-    let message = "";
-    let receivers = [];
-
-    // ✅ INDIVIDUAL CHAT
     if (reqDoc.chatType === "individual") {
-      const otherUserId =
-        String(reqDoc.senderId) === String(userId)
-          ? reqDoc.receiverId
-          : reqDoc.senderId;
-      const receiver = await User.findById(otherUserId).select("fcmToken email");
+      // Individual chat notification
+      const receiverId = String(reqDoc.senderId) === String(userId) ? reqDoc.receiverId : reqDoc.senderId;
+      const receiver = await User.findById(receiverId).select("firstname lastname email fcmToken");
 
       if (receiver) {
-        title = "New Media Message";
-        const fileName = file.originalname || "a file";
-        message = `${senderName} sent you ${fileName}`;
+        let messageBody = "";
+        if (messageType === 'image') {
+          messageBody = `${senderName} sent an image`;
+        } else if (messageType === 'video') {
+          messageBody = `${senderName} sent a video`;
+        } else if (messageType === 'audio') {
+          messageBody = `${senderName} sent an audio message`;
+        } else if (messageType === 'pdf') {
+          messageBody = `${senderName} sent a document`;
+        } else {
+          messageBody = `${senderName} sent a file`;
+        }
 
-        // Save DB Notification
+        const title = "New Media Message";
+        const body = messageBody;
+
         const notification = await Notification.create({
           userId: receiver._id,
           title,
-          message,
+          message: body,
           deeplink: "",
+          chatId: groupRoot._id.toString(),
         });
 
-        console.log(`💾 Notification saved to DB for user ${receiver._id}: ${notification}`);
+        logger.log("Receiver info for media notification:", notification);
 
-        // Send Firebase Notification
         if (receiver.fcmToken) {
           const pushResult = await sendFirebaseNotification(
             receiver.fcmToken,
             title,
-            message,
-            { type: "chat_media", chatId: chatKeyId.toString(), senderId: userId }
+            body,
+            { type: "chat_message", senderId: userId.toString(), deeplink: "", chatId: chatId.toString() }
           );
 
           notification.firebaseStatus = pushResult.success ? "sent" : "failed";
           await notification.save();
 
-          if (pushResult.success) {
-            console.log(`✅ Media notification sent to ${receiver.email}`);
-          } else {
-            console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
-            if (pushResult.error.includes("invalid-registration-token")) {
-              await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
-            }
+          if (pushResult.error?.includes("invalid-registration-token")) {
+            await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
           }
-        } else {
-          console.warn("⚠️ Receiver has no FCM token, skipping push notification");
         }
-
-        io.to(`user:${otherUserId}`).emit("chat:media", {
-          chatId: chatKeyId,
-          message,
-          sender: senderName,
-        });
       }
-    }
-
-    // ✅ GROUP CHAT
-    else if (reqDoc.chatType === "group") {
-      const groupRoot =
-        reqDoc.receiverId === null
-          ? reqDoc
-          : await ChatRequest.findOne({
-            _id: reqDoc.groupId,
-            chatType: "group",
-            receiverId: null,
-          }).select("members superAdmins groupAdmin name");
+    } else if (reqDoc.chatType === "group") {
+      // Group chat notification
+      const groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({
+        _id: reqDoc.groupId,
+        chatType: "group",
+        receiverId: null,
+      }).select("members superAdmins groupAdmin");
 
       if (groupRoot) {
-        title = "New Group Media";
-        const fileName = file.originalname || "a file";
-        message = `${senderName} shared ${fileName} in “${groupRoot.name || "Group"}”`;
-
-        // Collect all group users except sender
-        receivers = [
+        const allGroupMemberIds = [
           String(groupRoot.groupAdmin),
           ...(groupRoot.superAdmins || []).map(String),
-          ...(groupRoot.members || []).map(String),
-        ].filter((id) => id !== String(userId));
+          ...(groupRoot.members || []).map(String)
+        ].filter(id => id !== String(userId));
 
-        for (const receiverId of receivers) {
-          const receiver = await User.findById(receiverId).select("fcmToken email");
-          if (!receiver) continue;
+        let messageBody = "";
+        if (messageType === 'image') {
+          messageBody = `${senderName} sent an image in ${groupRoot.name || "Group"}`;
+        } else if (messageType === 'video') {
+          messageBody = `${senderName} sent a video in ${groupRoot.name || "Group"}`;
+        } else if (messageType === 'audio') {
+          messageBody = `${senderName} sent an audio message in ${groupRoot.name || "Group"}`;
+        } else if (messageType === 'pdf') {
+          messageBody = `${senderName} sent a document in ${groupRoot.name || "Group"}`;
+        } else {
+          messageBody = `${senderName} sent a file in ${groupRoot.name || "Group"}`;
+        }
 
+        const title = "New Group Media";
+        const body = messageBody;
+
+        // Get all receivers except sender
+        const receivers = await User.find({
+          _id: { $in: allGroupMemberIds },
+        }).select("fcmToken email");
+
+        for (const receiver of receivers) {
           const notification = await Notification.create({
             userId: receiver._id,
             title,
-            message,
+            message: body,
             deeplink: "",
           });
-
-          console.log(`💾 Notification saved to DB for group member ${receiver._id}: ${notification}`);
 
           if (receiver.fcmToken) {
             const pushResult = await sendFirebaseNotification(
               receiver.fcmToken,
               title,
-              message,
-              {
-                type: "group_media",
-                groupId: groupRoot._id.toString(),
-                senderId: userId,
-              }
+              body,
+              { type: "group_message", senderId: userId.toString(), groupId: groupRoot._id.toString(), chatId: groupRoot._id.toString() }
             );
 
             notification.firebaseStatus = pushResult.success ? "sent" : "failed";
             await notification.save();
-
-            if (pushResult.success) {
-              console.log(`✅ Group media notification sent to ${receiver.email}`);
-            } else {
-              console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
-              if (pushResult.error.includes("invalid-registration-token")) {
-                await User.findByIdAndUpdate(receiver._id, { $unset: { fcmToken: 1 } });
-              }
-            }
-          } else {
-            console.warn(`⚠️ Group user ${receiver.email} has no FCM token`);
           }
-
-          io.to(`user:${receiverId}`).emit("group:media", {
-            groupId: groupRoot._id,
-            message,
-            sender: senderName,
-          });
         }
       }
     }
   } catch (err) {
-    console.error("❌ Error sending media notification:", err.message);
+    logger.error("❌ Error sending media notification:", err.message);
   }
-  try { await redisClient.del([`chat:${String(chatKeyId)}`]); } catch { }
-  return successResponse(res, 'Message sent', { ...baseMessageData, type: 'send' }, null, 200, 1);
+
+  try {
+    await redisClient.del(`chat:${String(chatKeyId)}`);
+  } catch { }
+
+  return successResponse(res, 'Message sent', responseMessage, null, 200, 1);
 });
 
 export const getIndividualMessages = asyncHandler(async (req, res) => {
-  const { chatId } = req.params; // ChatRequest ID
+  const { chatId } = req.params;
   const userId = req.user?.id;
 
-  // Validate MongoDB ObjectId format
   if (!mongoose.Types.ObjectId.isValid(chatId)) {
-    // Invalid ID format - return 200 with status 0 (API worked, but chat id not found)
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
   const reqDoc = await ChatRequest.findById(chatId);
-  // Chat not found - return 200 with status 0 (API worked, but chat id not found)
   if (!reqDoc) {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
@@ -865,60 +714,22 @@ export const getIndividualMessages = asyncHandler(async (req, res) => {
   const convo = await ChatConversation.findOne({ chatRequestId: reqDoc._id })
     .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
 
-  // ✅ CREATE A MAP OF DELETED MESSAGE IDs FOR CURRENT USER FROM deletedForMe
-  const deletedForMeMap = new Map();
-  if (convo?.deletedForMe && Array.isArray(convo.deletedForMe)) {
-    convo.deletedForMe.forEach(deletion => {
-      if (deletion.userId && deletion.userId.toString() === userId.toString()) {
-        deletedForMeMap.set(deletion.messageId.toString(), deletion);
-      }
-    });
-  }
+  const deletedForMeMap = createDeletedForMeMap(convo, userId);
 
-  const messages = (convo?.messages || []).map(m => {
-    const ts = formatMessageTimestamp(m.createdAt || Date.now());
-    const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
+  const messages = (convo?.messages || [])
+    .map(m => {
+      const isDeleteMe = deletedForMeMap.has(m._id.toString());
+      if (isDeleteMe) return null;
 
-    // ✅ READ DELETION FLAGS FROM DATABASE
-    const isDeleteEvery = m.isDeleteEvery === true;
-    // ✅ USER-SPECIFIC DELETION: Only check deletedForMe array (not global isDeleteMe flag)
-    const isDeleteMe = deletedForMeMap.has(m._id.toString());
-
-    // If message is deleted for me (current user), don't include it in response
-    if (isDeleteMe) {
-      return null;
-    }
-
-    return {
-      _id: String(m._id),
-      content: isDeleteEvery ? "This message has been deleted" : m.content,
-      mediaUrl: isDeleteEvery ? null : m.mediaUrl,
-      messageType: isDeleteEvery ? "text" : (m.messageType || "text"),
-      isDeleteEvery: isDeleteEvery,
-      isDeleteMe: isDeleteMe,
-      deletedAt: m.deletedAt || null,
-      createdAt: m.createdAt,
-      time: displayTime,
-      sender: m.sender?._id ? (m.sender.isDeleted === true ? {
-        _id: String(m.sender._id),
-        firstname: "Profile",
-        lastname: "Deleted",
-        email: "",
-        profileimg: "/uploads/default.png",
-        isDeleted: true
-      } : {
-        _id: String(m.sender._id),
-        firstname: m.sender.firstname,
-        lastname: m.sender.lastname,
-        email: m.sender.email,
-        profileimg: m.sender.profileimg
-      }) : m.sender,
-      type: String(m.sender?._id || m.sender) === String(userId) ? 'send' : 'receive'
-    };
-  }).filter(m => m !== null); // Filter out null messages (deleted for me)
+      return createMessageResponse(m, userId, chatId);
+    })
+    .filter(m => m !== null);
 
   const data = { chatRequestId: chatId, messages };
-  try { await redisClient.setEx(cacheKey, 60, JSON.stringify({ message: "Messages fetched", data })); } catch { }
+  try {
+    await redisClient.setEx(cacheKey, 60, JSON.stringify({ message: "Messages fetched", data }));
+  } catch { }
+
   return successResponse(res, "Messages fetched", data, null, 200, 1);
 });
 
@@ -930,12 +741,12 @@ export const getChatMessages = asyncHandler(async (req, res) => {
   const search = req.query.search ? req.query.search.trim() : "";
   const skip = (page - 1) * limit;
 
-  // Validate MongoDB ObjectId format
   if (!mongoose.Types.ObjectId.isValid(chatId)) {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
   const cacheKey = `chat:${String(chatId)}:user:${String(userId)}:page:${page}:limit:${limit}:search:${search}`;
+
   const cached = await redisClient.get(cacheKey);
   if (cached) {
     const parsed = JSON.parse(cached);
@@ -947,91 +758,56 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     return successResponse(res, "Chat id not found", null, null, 200, 0);
   }
 
-  // Individual chat
   if (reqDoc.chatType === 'individual') {
     if (reqDoc.status !== 'accepted') return successResponse(res, "Chat request not accepted yet", null, null, 200, 0);
     const participants = [reqDoc.senderId.toString(), reqDoc.receiverId.toString()];
     if (!participants.includes(String(userId))) return successResponse(res, "Not a participant of this chat", null, null, 200, 0);
 
-    // Mark messages as read for this user
     try {
       await ChatConversation.findOneAndUpdate(
         { chatRequestId: reqDoc._id },
-        { $set: { [`lastReadAtByUser.${String(userId)}`]: new Date() } },
+        {
+          $set: {
+            [`lastReadAtByUser.${String(userId)}`]: new Date()
+          }
+        },
         { upsert: true }
       );
-    } catch { }
-
-    const convo = await ChatConversation.findOne({ chatRequestId: reqDoc._id })
-      .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
-
-    // ✅ CREATE A MAP OF DELETED MESSAGE IDs FOR CURRENT USER FROM deletedForMe
-    const deletedForMeMap = new Map();
-    if (convo?.deletedForMe && Array.isArray(convo.deletedForMe)) {
-      convo.deletedForMe.forEach(deletion => {
-        if (deletion.userId && deletion.userId.toString() === userId.toString()) {
-          deletedForMeMap.set(deletion.messageId.toString(), deletion);
-        }
-      });
+    } catch (error) {
+      logger.warn("Failed to update last read timestamp:", error.message);
     }
 
-    let messages = (convo?.messages || []).map(m => {
-      const ts = formatMessageTimestamp(m.createdAt || Date.now());
-      const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
+    let convo;
+    try {
+      convo = await ChatConversation.findOne({ chatRequestId: reqDoc._id })
+        .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+    } catch (error) {
+      logger.error("Error fetching conversation:", error.message);
+      return errorResponse(res, "Failed to fetch messages", 500);
+    }
 
-      // ✅ READ DELETION FLAGS FROM DATABASE
-      const isDeleteEvery = m.isDeleteEvery === true;
-      // ✅ USER-SPECIFIC DELETION: Only check deletedForMe array (not global isDeleteMe flag)
-      // isDeleteMe on message is a global flag, deletedForMe is user-specific
-      const isDeleteMe = deletedForMeMap.has(m._id.toString());
+    const deletedForMeMap = createDeletedForMeMap(convo, userId);
 
-      // If message is deleted for me (current user), don't include it in response
-      if (isDeleteMe) {
-        return null;
-      }
+    let messages = [];
+    try {
+      messages = (convo?.messages || [])
+        .map(m => {
+          if (!m) return null;
+          const isDeleteMe = deletedForMeMap.has(m._id.toString());
+          if (isDeleteMe) return null;
+          try {
+            return createMessageResponse(m, userId, chatId);
+          } catch (error) {
+            logger.warn("Error creating message response:", error.message);
+            return null;
+          }
+        })
+        .filter(m => m !== null);
+    } catch (error) {
+      logger.error("Error processing messages:", error.message);
+      return errorResponse(res, "Failed to process messages", 500);
+    }
 
-      return {
-        _id: String(m._id),
-        content: isDeleteEvery ? "This message has been deleted" : m.content,
-        mediaUrl: isDeleteEvery ? null : m.mediaUrl,
-        messageType: isDeleteEvery ? "text" : m.messageType,
-        // NEW: Read flags from database
-        isDeleteMe: isDeleteMe,
-        isDeleteEvery: isDeleteEvery,
-        deletedAt: m.deletedAt || null,
-        deletedBy: m.deletedBy ? String(m.deletedBy) : null,
-        deletedFor: m.deletedFor || null,
-        canEdit: !isDeleteEvery &&
-          !isDeleteMe &&
-          String(m.sender?._id || m.sender) === String(userId) &&
-          m.messageType === 'text' &&
-          !m.mediaUrl,
-        createdAt: m.createdAt,
-        isEdited: m.isEdited || false,
-        editedAt: m.editedAt || null,
-        time: displayTime,
-        sender: m.sender?._id ? (m.sender.isDeleted === true ? {
-          _id: String(m.sender._id),
-          firstname: "Profile",
-          lastname: "Deleted",
-          email: "",
-          profileimg: "/uploads/default.png",
-          isDeleted: true
-        } : {
-          _id: String(m.sender._id),
-          firstname: m.sender.firstname,
-          lastname: m.sender.lastname,
-          email: m.sender.email,
-          profileimg: m.sender.profileimg
-        }) : m.sender,
-        type: String(m.sender?._id || m.sender) === String(userId) ? 'send' : 'receive'
-      };
-    });
-
-    // Filter out null messages (deleted for me)
-    messages = messages.filter(m => m !== null);
-
-    // Apply search filter if provided
     if (search) {
       const searchLower = search.toLowerCase();
       messages = messages.filter(m => {
@@ -1039,11 +815,10 @@ export const getChatMessages = asyncHandler(async (req, res) => {
       });
     }
 
-    // Sort and paginate
     messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
     const totalMessages = messages.length;
     const paginatedMessages = messages.slice(skip, skip + limit);
-    paginatedMessages.reverse();
 
     const pagination = {
       currentPage: page,
@@ -1054,11 +829,14 @@ export const getChatMessages = asyncHandler(async (req, res) => {
 
     const data = { chatRequestId: chatId, messages: paginatedMessages };
     const responseData = { message: "Messages fetched", data, pagination };
-    try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
+
+    try {
+      await redisClient.setEx(cacheKey, 10, JSON.stringify(responseData));
+    } catch { }
+
     return successResponse(res, "Messages fetched", data, pagination, 200, 1);
   }
 
-  // Group chat (similar logic as individual)
   const groupRoot = reqDoc.receiverId === null ? reqDoc : await ChatRequest.findOne({ _id: reqDoc.groupId, chatType: 'group', receiverId: null });
   if (!groupRoot) return successResponse(res, "Group id not found", null, null, 200, 0);
 
@@ -1067,7 +845,6 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     || (groupRoot.members || []).map(String).includes(String(userId));
   if (!isParticipant) return successResponse(res, "You are not a member of this group", null, null, 200, 0);
 
-  // Mark messages as read for this user
   try {
     await ChatConversation.findOneAndUpdate(
       { chatRequestId: groupRoot._id },
@@ -1076,91 +853,56 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     );
   } catch { }
 
-  const convo = await ChatConversation.findOne({ chatRequestId: groupRoot._id })
-    .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+  let convo;
+  try {
+    convo = await ChatConversation.findOne({ chatRequestId: groupRoot._id })
+      .populate({ path: 'messages.sender', select: 'firstname lastname email profileimg isDeleted' });
+  } catch (error) {
+    logger.error("Error fetching group conversation:", error.message);
+    return errorResponse(res, "Failed to fetch messages", 500);
+  }
 
   let joinedAtDate = null;
   if (convo?.joinedAtByUser) {
-    const joinedEntry = typeof convo.joinedAtByUser.get === "function"
-      ? convo.joinedAtByUser.get(String(userId))
-      : convo.joinedAtByUser[String(userId)];
-    if (joinedEntry) {
-      joinedAtDate = new Date(joinedEntry);
-    }
-  }
-
-  // ✅ CREATE A MAP OF DELETED MESSAGE IDs FOR CURRENT USER FROM deletedForMe
-  const deletedForMeMap = new Map();
-  if (convo?.deletedForMe && Array.isArray(convo.deletedForMe)) {
-    convo.deletedForMe.forEach(deletion => {
-      if (deletion.userId && deletion.userId.toString() === userId.toString()) {
-        deletedForMeMap.set(deletion.messageId.toString(), deletion);
+    try {
+      const joinedEntry = typeof convo.joinedAtByUser.get === "function"
+        ? convo.joinedAtByUser.get(String(userId))
+        : convo.joinedAtByUser[String(userId)];
+      if (joinedEntry) {
+        joinedAtDate = new Date(joinedEntry);
       }
-    });
+    } catch (error) {
+      logger.warn("Error getting joinedAtDate:", error.message);
+    }
   }
 
-  let messages = (convo?.messages || []).map(m => {
-    const ts = formatMessageTimestamp(m.createdAt || Date.now());
-    const displayTime = ts.dateLabel ? `${ts.timeLabel}, ${ts.dateLabel}` : ts.timeLabel;
+  const deletedForMeMap = createDeletedForMeMap(convo, userId);
 
-    // ✅ READ DELETION FLAGS FROM DATABASE
-    const isDeleteEvery = m.isDeleteEvery === true;
-    // ✅ USER-SPECIFIC DELETION: Only check deletedForMe array (not global isDeleteMe flag)
-    // isDeleteMe on message is a global flag, deletedForMe is user-specific
-    const isDeleteMe = deletedForMeMap.has(m._id.toString());
+  let messages = [];
+  try {
+    messages = (convo?.messages || [])
+      .map(m => {
+        if (!m) return null;
+        const isDeleteMe = deletedForMeMap.has(m._id.toString());
+        if (isDeleteMe) return null;
 
-    // If message is deleted for me (current user), don't include it in response
-    if (isDeleteMe) {
-      return null;
-    }
+        if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
+          return null;
+        }
 
-    // Hide history for users who joined later
-    if (joinedAtDate && new Date(m.createdAt) < joinedAtDate) {
-      return null;
-    }
+        try {
+          return createMessageResponse(m, userId, groupRoot._id);
+        } catch (error) {
+          logger.warn("Error creating message response:", error.message);
+          return null;
+        }
+      })
+      .filter(m => m !== null);
+  } catch (error) {
+    logger.error("Error processing group messages:", error.message);
+    return errorResponse(res, "Failed to process messages", 500);
+  }
 
-    return {
-      _id: String(m._id),
-      content: isDeleteEvery ? "This message has been deleted" : m.content,
-      mediaUrl: isDeleteEvery ? null : m.mediaUrl,
-      messageType: isDeleteEvery ? "text" : m.messageType,
-      // NEW: Read flags from database
-      isDeleteMe: isDeleteMe,
-      isDeleteEvery: isDeleteEvery,
-      deletedAt: m.deletedAt || null,
-      deletedBy: m.deletedBy ? String(m.deletedBy) : null,
-      deletedFor: m.deletedFor || null,
-      canEdit: !isDeleteEvery &&
-        !isDeleteMe &&
-        String(m.sender?._id || m.sender) === String(userId) &&
-        m.messageType === 'text' &&
-        !m.mediaUrl,
-      createdAt: m.createdAt,
-      isEdited: m.isEdited || false,
-      editedAt: m.editedAt || null,
-      time: displayTime,
-      sender: m.sender?._id ? (m.sender.isDeleted === true ? {
-        _id: String(m.sender._id),
-        firstname: "Profile",
-        lastname: "Deleted",
-        email: "",
-        profileimg: "/uploads/default.png",
-        isDeleted: true
-      } : {
-        _id: String(m.sender._id),
-        firstname: m.sender.firstname,
-        lastname: m.sender.lastname,
-        email: m.sender.email,
-        profileimg: m.sender.profileimg
-      }) : m.sender,
-      type: String(m.sender?._id || m.sender) === String(userId) ? 'send' : 'receive'
-    };
-  });
-
-  // Filter out null messages (deleted for me)
-  messages = messages.filter(m => m !== null);
-
-  // Apply search filter if provided
   if (search) {
     const searchLower = search.toLowerCase();
     messages = messages.filter(m => {
@@ -1168,11 +910,10 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     });
   }
 
-  // Sort and paginate
   messages.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
   const totalMessages = messages.length;
   const paginatedMessages = messages.slice(skip, skip + limit);
-  paginatedMessages.reverse();
 
   const pagination = {
     currentPage: page,
@@ -1187,6 +928,96 @@ export const getChatMessages = asyncHandler(async (req, res) => {
     messages: paginatedMessages
   };
   const responseData = { message: "Messages fetched", data, pagination };
-  try { await redisClient.setEx(cacheKey, 60, JSON.stringify(responseData)); } catch { }
+
+  try {
+    await redisClient.setEx(cacheKey, 10, JSON.stringify(responseData));
+  } catch { }
+
   return successResponse(res, "Messages fetched", data, pagination, 200, 1);
+});
+
+export const getUsersForCreateGroup = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const search = req.query.search ? req.query.search.trim() : "";
+  const skip = (page - 1) * limit;
+
+  if (!userId) {
+    return errorResponse(res, "User not authenticated", 401);
+  }
+
+  // ✅ Build search query - exclude current user, admins, deleted users, and only include subscribed users
+  let searchQuery = {
+    _id: { $ne: userId }, // Exclude current user
+    isDeleted: { $ne: true }, // Exclude deleted users
+    isAdmin: { $ne: true }, // ✅ Exclude all admins/superadmins
+    isSubscription: true // ✅ Only include subscribed users
+  };
+
+  if (search) {
+    const searchRegex = new RegExp(search, 'i');
+    searchQuery.$and = [
+      {
+        $or: [
+          { firstname: searchRegex },
+          { lastname: searchRegex },
+          { email: searchRegex },
+          {
+            $expr: {
+              $regexMatch: {
+                input: { $concat: ["$firstname", " ", "$lastname"] },
+                regex: search,
+                options: "i"
+              }
+            }
+          }
+        ]
+      }
+    ];
+  }
+
+  try {
+    // Get total count for pagination
+    const totalUsers = await User.countDocuments(searchQuery);
+
+    // Get users with pagination - only subscribed users or admins
+    const users = await User.find(searchQuery)
+      .select('firstname lastname email profileimg isSubscription isAdmin')
+      .sort({ firstname: 1, lastname: 1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // Format response
+    const formattedUsers = users.map(user => ({
+      _id: user._id,
+      firstname: user.firstname || "",
+      lastname: user.lastname || "",
+      email: user.email,
+      profileimg: user.profileimg || "/uploads/default.png",
+      fullName: `${user.firstname || ""} ${user.lastname || ""}`.trim(),
+      isSubscription: user.isSubscription || false,
+      isAdmin: user.isAdmin || false
+    }));
+
+    const pagination = {
+      currentPage: page,
+      totalPages: Math.ceil(totalUsers / limit),
+      totalItems: totalUsers,
+      itemsPerPage: limit,
+      hasNext: page < Math.ceil(totalUsers / limit),
+      hasPrev: page > 1
+    };
+
+    const data = {
+      users: formattedUsers
+    };
+
+    return successResponse(res, "Users fetched successfully for group creation", data, pagination, 200, 1);
+
+  } catch (error) {
+    logger.error("Error fetching users for group creation:", error.message);
+    return errorResponse(res, "Failed to fetch users", 500);
+  }
 });

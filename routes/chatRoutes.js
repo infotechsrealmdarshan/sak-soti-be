@@ -2,9 +2,9 @@ import express from "express";
 import auth from "../middlewares/auth.js";
 import subscriptionRequired from "../middlewares/subscription.js";
 import { uploadMedia, uploadLimitErrorHandler } from "../middlewares/uploadMedia.js";
-import { actOnChatRequest, getRequestsByType, sendChatRequest } from "../controller/chatController/chatRequestController.js";
+import { actOnChatRequest, getRequestsByType, sendChatRequest, getChatRequestDetails } from "../controller/chatController/chatRequestController.js";
 import { createGroupViaJson, deleteGroupByCreator, updateGroupByCreator, updateGroupProfileByCreator } from "../controller/chatController/groupController.js";
-import { getChatMessages, sendChatMessage, uploadChatMedia } from "../controller/chatController/chatController.js";
+import { getChatMessages, getUsersForCreateGroup, sendChatMessage, uploadChatMedia } from "../controller/chatController/chatController.js";
 import { deleteChatMessagesBulk, editMessage } from "../controller/chatController/updateChatController.js";
 
 const router = express.Router();
@@ -115,6 +115,28 @@ router.get("/requests", auth, subscriptionRequired, getRequestsByType);
  *         description: API logic issue
  */
 router.put("/request/:id", auth, subscriptionRequired, actOnChatRequest);
+
+/**
+ * @swagger
+ * /api/chat/request/details/{id}:
+ *   get:
+ *     tags: [Chat]
+ *     summary: Get chat request details by ID
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Chat details fetched
+ *       404:
+ *         description: Chat request not found
+ */
+router.get("/request/details/:id", auth, subscriptionRequired, getChatRequestDetails);
 
 /**
  * @swagger
@@ -229,7 +251,7 @@ router.get("/:chatId", auth, subscriptionRequired, getChatMessages);
 
 /**
  * @swagger
- * /api/chat/{chatId}/messages:
+ * /api/chat/messages/{chatId}:
  *   delete:
  *     tags: [Chat]
  *     summary: Bulk delete messages with smart permission handling
@@ -277,7 +299,7 @@ router.get("/:chatId", auth, subscriptionRequired, getChatMessages);
  *       403:
  *         description: Permission denied (trying to delete others' messages for everyone)
  */
-router.delete("/:chatId/messages", auth, subscriptionRequired, deleteChatMessagesBulk);
+router.delete("/messages/:chatId", auth, subscriptionRequired, deleteChatMessagesBulk);
 
 // removed eligible-users endpoint
 /**
@@ -473,12 +495,49 @@ router.delete("/group/:id", auth, subscriptionRequired, deleteGroupByCreator);
  *         description: API logic issue - token missing or invalid / Group not found
  */
 router.put(
-  "/group/profile",
-  auth,
-  subscriptionRequired,
-  uploadMedia(["image"], 0, {}).single("image"),
-  updateGroupProfileByCreator,
-  uploadLimitErrorHandler
+	"/group/profile",
+	auth,
+	subscriptionRequired,
+	uploadMedia(["image"], 0, {}).single("image"),
+	updateGroupProfileByCreator,
+	uploadLimitErrorHandler
 );
+
+/**
+ * @swagger
+ * /api/chat/users/group-creation:
+ *   get:
+ *     tags: [Chat]
+ *     summary: Get users for group creation with search and pagination
+ *     description: Fetch users excluding current user for group member selection
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search by first name, last name, email, or full name
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number for pagination
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of users per page
+ *     responses:
+ *       200:
+ *         description: Users fetched successfully
+ *       401:
+ *         description: Unauthorized
+ *       500:
+ *         description: Internal server error
+ */
+router.get("/users/group-creation", auth, subscriptionRequired, getUsersForCreateGroup);
 
 export default router;

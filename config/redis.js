@@ -10,7 +10,7 @@
 //     },
 //   });
 
-//   console.log("Using REDIS_URL for Redis connection");
+//   logger.log("Using REDIS_URL for Redis connection");
 // } else {
 //   // Local Redis config
 //   redisClient = new Redis({
@@ -23,16 +23,16 @@
 //     },
 //   });
 
-//   console.log("Using host/port config for Redis connection");
+//   logger.log("Using host/port config for Redis connection");
 // }
 
 // // Events
 // redisClient.on("connect", () => {
-//   console.log("✅ Redis Client Connected");
+//   logger.log("✅ Redis Client Connected");
 // });
 
 // redisClient.on("error", (err) => {
-//   console.error("❌ Redis Client Error:", err);
+//   logger.error("❌ Redis Client Error:", err);
 // });
 
 // // Add correct setEx function for ioredis
@@ -43,6 +43,7 @@
 // export default redisClient;
 
 import Redis from "ioredis";
+import logger from "../utils/logger.js";
 
 let redisClient;
 
@@ -57,16 +58,16 @@ try {
     }
   });
 } catch (err) {
-  console.error("❌ Failed to initialize Redis:", err);
+  logger.error("❌ Failed to initialize Redis:", err);
 }
 
 // Events
 redisClient.on("connect", () => {
-  console.log("✅ Redis connected to Upstash");
+  logger.log("✅ Redis connected to Upstash");
 });
 
 redisClient.on("error", (err) => {
-  console.error("❌ Redis error:", err.message);
+  logger.error("❌ Redis error:", err.message);
 });
 
 // Add setEx manually

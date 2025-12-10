@@ -4,6 +4,7 @@ import { asyncHandler } from "../utils/errorHandler.js";
 import { successResponse, errorResponse } from "../utils/response.js";
 import path from "path";
 import { paginate } from "../utils/paginate.js";
+import logger from "../utils/logger.js";
 
 
 export const createNews = asyncHandler(async (req, res) => {
@@ -86,7 +87,7 @@ export const getAllNews = asyncHandler(async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Error fetching news:", error);
+    logger.error("Error fetching news:", error);
     res.status(500).json({
       success: false,
       error: "Failed to fetch news",

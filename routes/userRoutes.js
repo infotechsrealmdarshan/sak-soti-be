@@ -277,7 +277,7 @@ router.put("/status", auth, updateStatus);
 
 /**
  * @swagger
- * /api/users/refresh:
+ * /api/users/refresh-token:
  *   post:
  *     summary: Refresh access token using refresh token
  *     description: Generate a new access token using a valid refresh token. The refresh token must be valid and stored in the system.
@@ -301,7 +301,7 @@ router.put("/status", auth, updateStatus);
  *       404:
  *         description: Invalid or expired refresh token
  */
-router.post("/refresh", refreshToken);
+router.post("/refresh-token", refreshToken);
 
 /**
  * @swagger

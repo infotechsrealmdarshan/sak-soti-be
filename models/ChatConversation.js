@@ -8,19 +8,19 @@ const convoMessageSchema = new Schema(
     content: { type: String },
     mediaUrl: { type: String },
     messageType: { type: String, enum: ["text", "image", "video", "audio", "pdf"], default: "text" },
-    
+    time: { type: Date },
     // NEW: Separate deletion flags
     isDeleteMe: { type: Boolean, default: false },
     isDeleteEvery: { type: Boolean, default: false },
-    
+
     deletedAt: { type: Date },
     deletedBy: { type: Schema.Types.ObjectId, ref: "User" },
     deletedFor: { type: String, enum: ["me", "everyone"], default: null },
-    
+
     isEdited: { type: Boolean, default: false },
     editedAt: { type: Date },
   },
-  { timestamps: { createdAt: true, updatedAt: false } }
+  { timestamps: { createdAt: true, updatedAt: false, currentTime: () => new Date() } }
 );
 
 const chatConversationSchema = new Schema(
@@ -33,7 +33,7 @@ const chatConversationSchema = new Schema(
     lastReadAtByUser: { type: Map, of: Date, default: {} },
     // Track when each participant joined (used to hide history for late joiners)
     joinedAtByUser: { type: Map, of: Date, default: {} },
-    
+
     // Keep deletedForMe for backward compatibility, but we'll use the new flags primarily
     deletedForMe: [{
       messageId: { type: Schema.Types.ObjectId, required: true },
@@ -42,7 +42,11 @@ const chatConversationSchema = new Schema(
       deleteFor: { type: String, enum: ["me"], default: "me" }
     }]
   },
-  { timestamps: true }
+  {
+    timestamps: {
+      currentTime: () => new Date()
+    }
+  }
 );
 
 chatConversationSchema.index({ chatRequestId: 1 });

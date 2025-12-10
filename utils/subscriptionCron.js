@@ -1,5 +1,7 @@
 import User from "../models/User.js";
 import redisClient from "../config/redis.js";
+import Subscription from "../models/Subscription.js"; // Add this import
+import logger from "./logger.js";
 
 /**
  * Check and update expired subscriptions
@@ -8,7 +10,7 @@ import redisClient from "../config/redis.js";
  */
 export const checkExpiredSubscriptions = async () => {
   try {
-    console.log("🔄 Checking expired subscriptions...");
+    logger.log("🔄 Checking expired subscriptions...");
 
     const now = new Date();
 
@@ -19,11 +21,11 @@ export const checkExpiredSubscriptions = async () => {
     });
 
     if (expiredUsers.length === 0) {
-      console.log("✅ No expired subscriptions found");
+      logger.log("✅ No expired subscriptions found");
       return { expired: 0, updated: 0 };
     }
 
-    console.log(`⚠️ Found ${expiredUsers.length} expired subscriptions`);
+    logger.log(`⚠️ Found ${expiredUsers.length} expired subscriptions`);
 
     // Update expired users
     let updatedCount = 0;
@@ -45,21 +47,21 @@ export const checkExpiredSubscriptions = async () => {
       try {
         await redisClient.del(`user:${user._id}`);
       } catch (redisError) {
-        console.warn(`⚠️ Redis cache clear failed for user ${user._id}:`, redisError.message);
+        logger.warn(`⚠️ Redis cache clear failed for user ${user._id}:`, redisError.message);
       }
 
       updatedCount++;
-      console.log(`✅ Subscription expired for user: ${user.email}`);
+      logger.log(`✅ Subscription expired for user: ${user.email}`);
     }
 
-    console.log(`✅ Updated ${updatedCount} expired subscriptions`);
+    logger.log(`✅ Updated ${updatedCount} expired subscriptions`);
 
     return {
       expired: expiredUsers.length,
       updated: updatedCount,
     };
   } catch (error) {
-    console.error("❌ Error checking expired subscriptions:", error.message);
+    logger.error("❌ Error checking expired subscriptions:", error.message);
     return {
       expired: 0,
       updated: 0,
@@ -73,12 +75,24 @@ export const checkAndExpireSubscription = async (user) => {
     return { expired: false, user };
   }
 
+  // ✅ FIRST: Check if user has ACTIVE Stripe subscription
+  const activeSubscription = await Subscription.findOne({
+    userId: user._id,
+    status: 'active'
+  });
+
+  // ✅ If Stripe subscription is ACTIVE, DON'T expire (even if local date passed)
+  if (activeSubscription) {
+    logger.log(`✅ User ${user.email} has active Stripe subscription - skipping manual expiration`);
+    return { expired: false, user };
+  }
+
   const now = new Date();
-  
-  // If subscription end date has passed, expire the subscription
+
+  // ✅ Only expire if subscription end date passed AND no active Stripe subscription
   if (user.subscriptionEndDate < now) {
-    console.log(`🔄 Auto-expiring subscription for user: ${user.email}`);
-    
+    logger.log(`🔄 Auto-expiring subscription for user: ${user.email}`);
+
     // Set lastSubscriptionDate to the expired end date
     if (user.subscriptionEndDate) {
       user.lastSubscriptionDate = user.subscriptionEndDate;
@@ -96,14 +110,14 @@ export const checkAndExpireSubscription = async (user) => {
     try {
       await Subscription.findOneAndUpdate(
         { userId: user._id, status: { $in: ['active', 'trialing'] } },
-        { 
+        {
           status: 'expired',
-          endDate: now 
+          endDate: now
         }
       );
-      console.log(`✅ Subscription record updated to expired for user: ${user.email}`);
+      logger.log(`✅ Subscription record updated to expired for user: ${user.email}`);
     } catch (subError) {
-      console.warn(`⚠️ Could not update subscription record: ${subError.message}`);
+      logger.warn(`⚠️ Could not update subscription record: ${subError.message}`);
     }
 
     return { expired: true, user };

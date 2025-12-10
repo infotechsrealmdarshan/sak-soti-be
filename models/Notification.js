@@ -10,7 +10,9 @@ const notificationSchema = new mongoose.Schema(
     title: { type: String, required: true },
     message: { type: String, required: true },
     deeplink: { type: String, default: "" },
+    chatId: { type: String, default: "" },
     isRead: { type: Boolean, default: false },
+    isExpired: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

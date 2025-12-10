@@ -1,6 +1,7 @@
 // utils/stripeHelper.js
 import Stripe from "stripe";
 import User from "../models/User.js";
+import logger from "./logger.js";
 
 // Initialize Stripe - using default API version (latest stable)
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -17,10 +18,10 @@ export const createStripeCustomer = async (user) => {
     user.stripeCustomerId = customer.id;
     await user.save();
 
-    console.log(`✅ Stripe customer created for user ${user.email}: ${customer.id}`);
+    logger.log(`✅ Stripe customer created for user ${user.email}: ${customer.id}`);
     return customer.id;
   } catch (err) {
-    console.error("❌ Stripe customer creation failed:", err.message);
+    logger.error("❌ Stripe customer creation failed:", err.message);
     throw err;
   }
 };
@@ -33,7 +34,7 @@ export const validateStripeCustomer = async (stripeCustomerId) => {
     if (customer?.deleted) return false; // deleted customer
     return true;
   } catch (err) {
-    console.warn("⚠️ Stripe customer validation failed:", err.message);
+    logger.warn("⚠️ Stripe customer validation failed:", err.message);
     return false;
   }
 };

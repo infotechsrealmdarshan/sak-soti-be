@@ -2,11 +2,12 @@ import mongoose from "mongoose";
 import Notification from "../models/Notification.js";
 import User from "../models/User.js";
 import { sendFirebaseNotification } from "./firebaseHelper.js";
+import logger from "./logger.js";
 
 const resolveUser = async (userOrId) => {
   if (!userOrId) return null;
   if (typeof userOrId === "string" || userOrId instanceof mongoose.Types.ObjectId) {
-    return User.findById(userOrId).select("firstname lastname email fcmToken");
+    return User.findById(userOrId).select("firstname lastname email fcmToken isSubscription isAdmin");
   }
   if (userOrId._id) {
     return userOrId;
@@ -24,6 +25,12 @@ export const notifyUser = async (userOrId, title, message, options = {}) => {
   try {
     const user = await resolveUser(userOrId);
     if (!user?._id) return null;
+
+    // ✅ CHECK SUBSCRIPTION STATUS
+    if (!user.isSubscription && !user.isAdmin) {
+      logger.log(`🚫 Notification skipped: User ${user._id} is not subscribed.`);
+      return null;
+    }
 
     const notification = await Notification.create({
       userId: user._id,
@@ -62,10 +69,10 @@ export const notifyUser = async (userOrId, title, message, options = {}) => {
         await User.findByIdAndUpdate(user._id, { $unset: { fcmToken: 1 } });
       }
     }
-    console.log(`✅ Notification created for user ${user._id}: ${notification}`);
+    logger.log(`✅ Notification created for user ${user._id}: ${notification}`);
     return notification;
   } catch (error) {
-    console.error("notifyUser error:", error);
+    logger.error("notifyUser error:", error);
     return null;
   }
 };
@@ -78,7 +85,7 @@ export const notifyUsers = async (usersOrIds, title, message, options = {}) => {
       const result = await notifyUser(user, title, message, options);
       results.push(result);
     } catch (error) {
-      console.error("notifyUsers iteration error:", error);
+      logger.error("notifyUsers iteration error:", error);
     }
   }
   return results;

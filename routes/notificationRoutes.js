@@ -60,20 +60,38 @@ router.post("/", auth, createNotification);
  * @swagger
  * /api/notification:
  *   get:
- *     summary: Get all notifications for the logged-in user
+ *     summary: Get all notifications for the logged-in user with pagination
  *     tags: [Notification]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Number of notifications per page
  *     responses:
  *       200:
  *         description: Notifications fetched successfully
+ *       401:
+ *         description: Unauthorized - Invalid or missing token
  */
 router.get("/", auth, getUserNotifications);
 
 /**
  * @swagger
  * /api/notification/{id}/read:
- *   patch:
+ *   put:
  *     tags: [Notification]
  *     summary: Mark a notification as read
  *     description: Marks a specific notification as read using its ID.
@@ -94,7 +112,7 @@ router.get("/", auth, getUserNotifications);
  *       500:
  *         description: Internal server error
  */
-router.patch("/:id/read", auth, markNotificationAsRead);
+router.put("/:id/read", auth, markNotificationAsRead);
 
 
 export default router;

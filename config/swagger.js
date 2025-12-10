@@ -39,11 +39,7 @@ const options = {
       {
         name: 'Chat',
         description: 'Individual chat & group chat requests and messaging'
-      },
-      {
-        name: 'Transaction',
-        description: 'Subscription and transaction management endpoints'
-      },
+      }
     ],
     components: {
       securitySchemes: {

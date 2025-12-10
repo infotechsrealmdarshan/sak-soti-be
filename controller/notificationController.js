@@ -2,12 +2,13 @@ import Notification from "../models/Notification.js";
 import User from "../models/User.js";
 import { asyncHandler } from "../utils/errorHandler.js";
 import { sendFirebaseNotification } from "../utils/firebaseHelper.js";
+import logger from "../utils/logger.js";
 import { successResponse, errorResponse } from "../utils/response.js";
 import admin from "firebase-admin";
 
 /**
  * @desc Create a new notification and send push if FCM token exists
- * @route POST /api/notification
+ * @route POST /api/notification`
  * @access Private
  */
 export const createNotification = asyncHandler(async (req, res) => {
@@ -21,12 +22,13 @@ export const createNotification = asyncHandler(async (req, res) => {
   const user = await User.findById(userId);
   if (!user) return errorResponse(res, "User not found", 404);
 
-  // Save in DB
+  // Save in DB with isExpired default false
   const notification = await Notification.create({
     userId,
     title,
     message,
     deeplink,
+    isExpired: false // Explicitly set to false
   });
 
   // ✅ Use your sendFirebaseNotification helper consistently
@@ -43,18 +45,18 @@ export const createNotification = asyncHandler(async (req, res) => {
     await notification.save();
 
     if (pushResult.success) {
-      console.log(`✅ Firebase notification sent to user ${userId}`);
+      logger.log(`✅ Firebase notification sent to user ${userId}`);
     } else {
-      console.error(`⚠️ Firebase send failed: ${pushResult.error}`);
-      
+      logger.error(`⚠️ Firebase send failed: ${pushResult.error}`);
+
       // Clear invalid token
       if (pushResult.error.includes('invalid-registration-token')) {
-        console.log("🔄 Clearing invalid FCM token from user record");
+        logger.log("🔄 Clearing invalid FCM token from user record");
         await User.findByIdAndUpdate(userId, { $unset: { fcmToken: 1 } });
       }
     }
   } else {
-    console.warn(`⚠️ User has no FCM token, skipping push notification`);
+    logger.warn(`⚠️ User has no FCM token, skipping push notification`);
     notification.firebaseStatus = "no_token";
     await notification.save();
   }
@@ -75,12 +77,57 @@ export const getUserNotifications = asyncHandler(async (req, res) => {
     return errorResponse(res, "Unauthorized: Invalid or missing token", 401);
   }
 
-  const notifications = await Notification.find({ userId })
-    .sort({ createdAt: -1 });
+  // Auto-expire notifications older than 7 days
+  const sevenDaysAgo = new Date();
+  sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
 
-  return successResponse(res, "Notifications fetched successfully", notifications);
+  // Update isExpired for notifications older than 7 days
+  await Notification.updateMany(
+    {
+      userId,
+      createdAt: { $lt: sevenDaysAgo },
+      isExpired: false // Only update those that are not already expired
+    },
+    {
+      $set: { isExpired: true }
+    }
+  );
+
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const skip = (page - 1) * limit;
+
+  const includeExpired = req.query.includeExpired === 'true';
+
+  const query = { userId };
+
+  if (!includeExpired) {
+    query.isExpired = false;
+  }
+
+  const notifications = await Notification.find(query)
+    .sort({
+      isRead: 1,
+      createdAt: -1
+    })
+    .skip(skip)
+    .limit(limit);
+
+  const totalNotifications = await Notification.countDocuments(query);
+  const totalPages = Math.ceil(totalNotifications / limit);
+
+  return successResponse(res, "Notifications fetched successfully", {
+    notifications,
+    pagination: {
+      currentPage: page,
+      totalPages,
+      totalNotifications,
+      hasNextPage: page < totalPages,
+      hasPrevPage: page > 1,
+      limit
+    },
+  });
 });
-
 
 /**
  * @desc Mark a notification as read
@@ -95,10 +142,15 @@ export const markNotificationAsRead = asyncHandler(async (req, res) => {
     return errorResponse(res, "Unauthorized: Invalid token", 401);
   }
 
-  // Check if notification exists and belongs to the user
-  const notification = await Notification.findOne({ _id: id, userId });
+  // Check if notification exists, belongs to the user, and is not expired
+  const notification = await Notification.findOne({
+    _id: id,
+    userId,
+    isExpired: false // Only allow marking as read for non-expired notifications
+  });
+
   if (!notification) {
-    return errorResponse(res, "Notification not found", 404);
+    return errorResponse(res, "Notification not found or expired", 404);
   }
 
   if (notification.isRead) {
@@ -110,4 +162,65 @@ export const markNotificationAsRead = asyncHandler(async (req, res) => {
   await notification.save();
 
   return successResponse(res, "Notification marked as read", notification);
+});
+
+/**
+ * @desc Cleanup expired notifications (optional manual cleanup endpoint)
+ * @route DELETE /api/notification/cleanup
+ * @access Private/User
+ */
+export const cleanupExpiredNotifications = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    return errorResponse(res, "Unauthorized: Invalid token", 401);
+  }
+
+  // Delete notifications that are expired
+  const result = await Notification.deleteMany({
+    userId,
+    isExpired: true
+  });
+
+  return successResponse(res, "Expired notifications cleaned up successfully", {
+    deletedCount: result.deletedCount
+  });
+});
+
+/**
+ * @desc Get all notifications including expired (for admin purposes)
+ * @route GET /api/notification/all
+ * @access Private/User
+ */
+export const getAllNotificationsIncludingExpired = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    return errorResponse(res, "Unauthorized: Invalid token", 401);
+  }
+
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 20;
+  const skip = (page - 1) * limit;
+
+  // Get all notifications including expired
+  const notifications = await Notification.find({ userId })
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit);
+
+  const totalNotifications = await Notification.countDocuments({ userId });
+  const totalPages = Math.ceil(totalNotifications / limit);
+
+  return successResponse(res, "All notifications fetched successfully", {
+    notifications,
+    pagination: {
+      currentPage: page,
+      totalPages,
+      totalNotifications,
+      hasNextPage: page < totalPages,
+      hasPrevPage: page > 1,
+      limit
+    }
+  });
 });

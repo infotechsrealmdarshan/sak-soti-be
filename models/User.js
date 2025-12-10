@@ -1,23 +1,26 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import logger from "../utils/logger.js";
 
 const userSchema = new mongoose.Schema(
   {
     firstname: { type: String, required: true, trim: true },
-    lastname: { type: String, required: true, trim: true },
+    lastname: { type: String, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true },
     password: {
       type: String,
       required: function () {
-        return !this.firebaseToken; // Password required only if not using Google auth
+        return !(this.isNew && !this.password);
       },
       minlength: 8,
       select: false,
       validate: {
         validator: function (value) {
-          // Skip validation if user is using Google auth (has firebaseToken but no password)
-          if (this.firebaseToken && !value) return true;
-          return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,}$/.test(value);
+          if (this.isNew && !value) return true;
+          if (value) {
+            return /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,}$/.test(value);
+          }
+          return true;
         },
         message:
           "Password must be at least 8 characters long and include one uppercase letter, one lowercase letter, one number, and one special character.",
@@ -47,7 +50,7 @@ const userSchema = new mongoose.Schema(
     firebaseToken: {
       type: String,
       default: null,
-      select: false, 
+      select: false,
     },
     stripeCustomerId: {
       type: String,
@@ -69,7 +72,10 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-
+    isGoogle: {
+      type: Boolean,
+      default: false
+    }
   },
   { timestamps: true }
 );
@@ -89,9 +95,9 @@ userSchema.post("save", async function (doc) {
       // Dynamically import to avoid circular dependency
       const { removeDeletedUserFromGroups } = await import("../utils/chatHelper.js");
       await removeDeletedUserFromGroups(doc._id.toString());
-      console.log(`✅ Removed deleted user ${doc._id} from all groups`);
+      logger.log(`✅ Removed deleted user ${doc._id} from all groups`);
     } catch (error) {
-      console.error(`❌ Error removing deleted user from groups:`, error);
+      logger.error(`❌ Error removing deleted user from groups:`, error);
     }
   }
 
@@ -100,9 +106,9 @@ userSchema.post("save", async function (doc) {
     try {
       const { handleUserRestored } = await import("../utils/chatHelper.js");
       await handleUserRestored(doc._id.toString());
-      console.log(`✅ User ${doc._id} restored - chat lists updated`);
+      logger.log(`✅ User ${doc._id} restored - chat lists updated`);
     } catch (error) {
-      console.error(`❌ Error handling user restore:`, error);
+      logger.error(`❌ Error handling user restore:`, error);
     }
   }
 });

@@ -23,3 +23,13 @@ export const formatMessageTimestamp = (date) => {
 };
 
 
+export const formatMessageTime = (date) => {
+  const dt = new Date(date);
+  const pad = (n) => (n < 10 ? `0${n}` : `${n}`);
+  let hours = dt.getHours();
+  const minutes = pad(dt.getMinutes());
+  const ampm = hours >= 12 ? 'pm' : 'am';
+  hours = hours % 12;
+  if (hours === 0) hours = 12;
+  return `${pad(hours)}:${minutes}${ampm}`;
+};

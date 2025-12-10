@@ -1,4 +1,5 @@
 import { errorResponse, successResponse } from "./response.js";
+import logger from "./logger.js";
 
 /**
  * Async handler wrapper for async route handlers
@@ -18,11 +19,11 @@ export const asyncHandler = (fn) => (req, res, next) => {
  * @param {Function} next - Express next middleware
  */
 export const globalErrorHandler = (err, req, res, next) => {
-  console.error("❌ Server Error:", err);
+  logger.error("❌ Server Error:", err);
 
   // Log full error details in development
   if (process.env.NODE_ENV === 'development') {
-    console.error("Error Stack:", err.stack);
+    logger.error("Error Stack:", err.stack);
   }
 
   // Handle specific error types
@@ -40,7 +41,7 @@ export const globalErrorHandler = (err, req, res, next) => {
     else if (errorPath.includes('news') || errorPath.includes('News')) resourceName = 'News';
     else if (errorPath.includes('chat') || errorPath.includes('Chat')) resourceName = 'Chat';
     else if (errorPath.includes('group') || errorPath.includes('Group')) resourceName = 'Group';
-    
+
     return successResponse(res, `${resourceName} id not found`, null, null, 200, 0);
   }
 
@@ -53,8 +54,8 @@ export const globalErrorHandler = (err, req, res, next) => {
   }
 
   // Default 500 server error
-  const errorMessage = process.env.NODE_ENV === 'production' 
-    ? "Internal Server Error" 
+  const errorMessage = process.env.NODE_ENV === 'production'
+    ? "Internal Server Error"
     : (err.message || "Internal Server Error");
 
   return errorResponse(res, errorMessage, 500);

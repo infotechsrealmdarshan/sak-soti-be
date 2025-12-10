@@ -4,6 +4,7 @@ import ChatConversation from "../models/ChatConversation.js";
 import { getIO } from "../config/socket.js";
 import mongoose from "mongoose";
 import redisClient from "../config/redis.js";
+import logger from "./logger.js";
 
 /**
  * Check if a user is deleted and return deleted user info
@@ -12,11 +13,11 @@ import redisClient from "../config/redis.js";
  */
 export const checkUserDeleted = async (userId) => {
   if (!userId) return { isDeleted: false, user: null };
-  
+
   try {
     const user = await User.findById(userId).select("isDeleted firstname lastname email profileimg");
     if (!user) return { isDeleted: false, user: null };
-    
+
     return {
       isDeleted: user.isDeleted === true,
       user: user.isDeleted ? {
@@ -29,7 +30,7 @@ export const checkUserDeleted = async (userId) => {
       } : user
     };
   } catch (error) {
-    console.error("Error checking user deleted status:", error);
+    logger.error("Error checking user deleted status:", error);
     return { isDeleted: false, user: null };
   }
 };
@@ -92,10 +93,10 @@ export const removeDeletedUserFromGroups = async (userId) => {
           ]);
           await redisClient.del(cacheKeys);
         } catch (err) {
-          console.warn("⚠️ Redis delete failed:", err.message);
+          logger.warn("⚠️ Redis delete failed:", err.message);
         }
 
-        console.log(`✅ Deleted group ${group._id} because creator ${userId} was deleted`);
+        logger.log(`✅ Deleted group ${group._id} because creator ${userId} was deleted`);
         continue; // Skip to next group
       }
 
@@ -154,11 +155,11 @@ export const removeDeletedUserFromGroups = async (userId) => {
           reason: "userDeleted"
         });
 
-        console.log(`✅ Removed deleted user ${userId} from group ${group._id}`);
+        logger.log(`✅ Removed deleted user ${userId} from group ${group._id}`);
       }
     }
   } catch (error) {
-    console.error("Error removing deleted user from groups:", error);
+    logger.error("Error removing deleted user from groups:", error);
   }
 };
 
@@ -173,15 +174,15 @@ export const handleUserRestored = async (userId) => {
     // They would need to be re-invited or re-added by group admin
     // But we can emit socket events to update chat lists
     const io = getIO();
-    
+
     io.to(`user:${userId}`).emit("chatList:update", {
       action: "userRestored",
       type: "all"
     });
-    
-    console.log(`✅ User ${userId} restored - chat lists updated`);
+
+    logger.log(`✅ User ${userId} restored - chat lists updated`);
   } catch (error) {
-    console.error("Error handling user restore:", error);
+    logger.error("Error handling user restore:", error);
   }
 };
 

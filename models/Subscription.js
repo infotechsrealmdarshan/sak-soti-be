@@ -9,9 +9,9 @@ const subscriptionSchema = new mongoose.Schema(
     },
 
     stripeCustomerId: { type: String, required: true },
-    stripeSubscriptionId: { type: String, required: true, unique: true },
+    stripeSubscriptionId: { type: String}, // Optional until Stripe subscription is created
+    stripePaymentIntentId: { type: String },
     priceId: { type: String, required: true },
-
     amount: { type: Number, required: true },
     currency: { type: String, required: true, uppercase: true, default: "USD" },
 
@@ -25,6 +25,7 @@ const subscriptionSchema = new mongoose.Schema(
       type: String,
       enum: [
         "in_progress",
+        "pending_payment",
         "active",
         "trialing",
         "canceled",
@@ -32,6 +33,7 @@ const subscriptionSchema = new mongoose.Schema(
         "incomplete",
         "past_due",
         "unpaid",
+        "cancel_scheduled",
       ],
       default: "in_progress",
     },
@@ -39,6 +41,9 @@ const subscriptionSchema = new mongoose.Schema(
     startDate: { type: Date, required: true },
     endDate: { type: Date, required: true },
     canceledAt: { type: Date, default: null },
+    isSubscriptionCancelled: { type: Boolean, default: false },
+    isRenewalEntry: { type: Boolean, default: false },
+    originalSubscriptionId: { type: String },
   },
   { timestamps: true }
 );

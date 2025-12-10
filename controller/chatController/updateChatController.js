@@ -10,6 +10,7 @@ import { successResponse, errorResponse } from "../../utils/response.js";
 import { getIO } from "../../config/socket.js";
 import { sendFirebaseNotification } from "../../utils/firebaseHelper.js";
 import Notification from "../../models/Notification.js";
+import logger from "../../utils/logger.js";
 
 /**
  * Edit a message - user can only edit their own messages
@@ -91,7 +92,7 @@ export const editMessage = asyncHandler(async (req, res) => {
     const messageDate = new Date(message.createdAt);
     const now = new Date();
     const twelveHoursMs = 12 * 60 * 60 * 1000;
-    
+
     if (now.getTime() - messageDate.getTime() > twelveHoursMs) {
       return errorResponse(res, "Message can only be edited within 12 hours of sending", 400);
     }
@@ -111,7 +112,7 @@ export const editMessage = asyncHandler(async (req, res) => {
     ).populate("messages.sender", "firstname lastname profileimg");
 
     let messageResponse;
-    
+
     if (populatedConversation?.messages?.[0]) {
       const populatedMessage = populatedConversation.messages[0];
       messageResponse = {
@@ -141,20 +142,18 @@ export const editMessage = asyncHandler(async (req, res) => {
     // ✅ FIXED: Enhanced socket event (same event name, more reliable)
     try {
       const io = getIO();
-      
+
       // Ensure all clients are in the room
       io.to(`chat:${String(chatId)}`).emit('messageEdited', {
         chatId: String(chatId),
         messageId: String(updatedMessage._id),
-        content: updatedMessage.content,
-        isEdited: true,
-        editedAt: updatedMessage.editedAt
+        content: updatedMessage.content
       });
-      
-      console.log(`✅ Socket: Emitted messageEdited for chat ${chatId}`);
-      
+
+      logger.log(`✅ Socket: Emitted messageEdited for chat ${chatId}`);
+
     } catch (err) {
-      console.error("Socket emit error (message edited):", err.message);
+      logger.error("Socket emit error (message edited):", err.message);
     }
 
     // Notifications to other participants (individual or group) - SAME
@@ -202,12 +201,12 @@ export const editMessage = asyncHandler(async (req, res) => {
               await notification.save();
             }
           } catch (e) {
-            console.warn("Edit notification error:", e?.message);
+            logger.warn("Edit notification error:", e?.message);
           }
         }
       }
     } catch (e) {
-      console.warn("Edit notify flow error:", e?.message);
+      logger.warn("Edit notify flow error:", e?.message);
     }
 
     return successResponse(
@@ -220,7 +219,7 @@ export const editMessage = asyncHandler(async (req, res) => {
     );
 
   } catch (error) {
-    console.error("Error editing message:", error);
+    logger.error("Error editing message:", error);
     return successResponse(
       res,
       "Error editing message",
@@ -337,7 +336,7 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
     const isAlreadyDeletedForEveryone = message.isDeleteEvery === true;
     const isAlreadyDeletedForMe = deletedForMeMap.has(msgId);
     const isAlreadyDeleted = isAlreadyDeletedForEveryone || isAlreadyDeletedForMe;
-    
+
     if (isAlreadyDeleted) {
       alreadyDeletedMessages.push({
         id: msgId,
@@ -381,7 +380,7 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
 
   // ✅ RETURN WARNING IF SOME MESSAGES ARE ALREADY DELETED
   if (alreadyDeletedMessages.length > 0 && messagesToDelete.length > 0) {
-    console.log(`⚠️ ${alreadyDeletedMessages.length} message(s) were already deleted, processing ${messagesToDelete.length} message(s)`);
+    logger.log(`⚠️ ${alreadyDeletedMessages.length} message(s) were already deleted, processing ${messagesToDelete.length} message(s)`);
   }
 
   // ✅ SMART DELETE LOGIC BASED ON MESSAGE TYPES
@@ -516,7 +515,7 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
     });
     await redisClient.del(cacheKeys);
   } catch (err) {
-    console.warn("Redis clear error:", err.message);
+    logger.warn("Redis clear error:", err.message);
   }
 
   // ✅ EMIT SOCKET EVENT FOR MESSAGE DELETION
@@ -524,18 +523,10 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
     const io = getIO();
     const deletionData = {
       chatId: String(chatKeyId),
-      deletedMessageIds: messagesToDelete.map(m => m.id),
-      deletedCount: messagesToDelete.length,
-      deletedBy: String(userId),
+      messageIds: messagesToDelete.map(m => m.id),
       deleteFor: finalDeleteFor,
-      isBulk: true,
-      timestamp: now,
-      // NEW: Include deletion type information
-      isDeleteMe: finalDeleteFor === 'me',
-      isDeleteEvery: finalDeleteFor === 'everyone',
-      // Include information about already deleted messages
-      alreadyDeletedCount: alreadyDeletedMessages.length,
-      alreadyDeletedMessageIds: alreadyDeletedMessages.map(m => m.id)
+      deletedBy: String(userId),
+      timestamp: now
     };
 
     if (finalDeleteFor === 'everyone') {
@@ -546,10 +537,9 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
           chatId: String(chatKeyId),
           action: "messagesDeleted",
           type: isGroup ? "group" : "individual",
-          deletedMessageIds: messagesToDelete.map(m => m.id),
+          messageIds: messagesToDelete.map(m => m.id),
           deleteFor: 'everyone',
-          isDeleteMe: false,
-          isDeleteEvery: true
+          timestamp: now
         });
       });
 
@@ -579,11 +569,11 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
               await notification.save();
             }
           } catch (e) {
-            console.warn("Deletion notification error:", e?.message);
+            logger.warn("Deletion notification error:", e?.message);
           }
         }
       } catch (e) {
-        console.warn("Deletion notify flow error:", e?.message);
+        logger.warn("Deletion notify flow error:", e?.message);
       }
     } else {
       // Emit only to the user who deleted the messages
@@ -592,37 +582,33 @@ export const deleteChatMessagesBulk = asyncHandler(async (req, res) => {
         chatId: String(chatKeyId),
         action: "messagesDeleted",
         type: isGroup ? "group" : "individual",
-        deletedMessageIds: messagesToDelete.map(m => m.id),
+        messageIds: messagesToDelete.map(m => m.id),
         deleteFor: 'me',
-        isDeleteMe: true,
-        isDeleteEvery: false
+        timestamp: now
       });
     }
 
     // Log deletion summary
     const sentCount = messagesToDelete.filter(m => m.messageType === 'send').length;
     const receivedCount = messagesToDelete.filter(m => m.messageType === 'receive').length;
-    console.log(`🗑️ ${messagesToDelete.length} message(s) deleted in chat ${chatKeyId} by user ${userId}`);
-    console.log(`📊 Deletion summary: ${sentCount} sent, ${receivedCount} received, deleteFor: ${finalDeleteFor}`);
-    console.log(`🏷️ Database flags: isDeleteMe: ${finalDeleteFor === 'me'}, isDeleteEvery: ${finalDeleteFor === 'everyone'}`);
+    logger.log(`🗑️ ${messagesToDelete.length} message(s) deleted in chat ${chatKeyId} by user ${userId}`);
+    logger.log(`📊 Deletion summary: ${sentCount} sent, ${receivedCount} received, deleteFor: ${finalDeleteFor}`);
+    logger.log(`🏷️ Database flags: isDeleteMe: ${finalDeleteFor === 'me'}, isDeleteEvery: ${finalDeleteFor === 'everyone'}`);
     if (alreadyDeletedMessages.length > 0) {
-      console.log(`⚠️ ${alreadyDeletedMessages.length} message(s) were already deleted`);
+      logger.log(`⚠️ ${alreadyDeletedMessages.length} message(s) were already deleted`);
     }
 
   } catch (err) {
-    console.error("Socket emit error (message deletion):", err.message);
+    logger.error("Socket emit error (message deletion):", err.message);
   }
 
   // ✅ FINAL RESPONSE WITH NEW STRUCTURE
   const responseData = {
-    deletedCount: messagesToDelete.length,
-    deletedMessageIds: messagesToDelete.map(m => m.id),
-    deleteFor: finalDeleteFor,
     chatId: String(chatKeyId),
-    containedReceivedMessages: containsReceivedMessages,
-    // NEW: Add deletion type flags
-    isDeleteMe: finalDeleteFor === 'me',
-    isDeleteEvery: finalDeleteFor === 'everyone'
+    messageIds: messagesToDelete.map(m => m.id),
+    deleteFor: finalDeleteFor,
+    deletedCount: messagesToDelete.length,
+    containedReceivedMessages: containsReceivedMessages
   };
 
   // Add information about already deleted messages if any

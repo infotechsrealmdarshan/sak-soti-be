@@ -16,6 +16,18 @@ export const formatSubscriptionResponse = (subscription, user, stripeSub, latest
     ? String(user.mobile || user.phone || user.phoneNumber || user.contactNumber)
     : null;
 
+  // ✅ Calculate cancellation status
+  const isSubscriptionCancelled = subscription.isSubscriptionCancelled || user?.isSubscriptionCancelled || false;
+  const canceledAt = subscription.canceledAt || user?.subscriptionCanceledAt;
+  const cancelAtPeriodEnd = stripeSub?.cancel_at_period_end ?? subscription.cancelAtPeriodEnd ?? false;
+  const currentPeriodEnd = stripeSub?.current_period_end ? new Date(stripeSub.current_period_end * 1000) : subscription.currentPeriodEnd;
+  
+  // ✅ Calculate service status
+  const isServiceActive = user?.isSubscription || false;
+  const hasActivePeriod = currentPeriodEnd ? new Date(currentPeriodEnd) > new Date() : false;
+  const daysRemaining = currentPeriodEnd ? 
+    Math.ceil((new Date(currentPeriodEnd) - new Date()) / (1000 * 60 * 60 * 24)) : 0;
+
   return {
     // Subscription identifiers
     id: stripeSub?.id || subscription.stripeSubscriptionId,
@@ -26,7 +38,7 @@ export const formatSubscriptionResponse = (subscription, user, stripeSub, latest
     
     // Subscription status
     status: stripeSub?.status || subscription.status || null,
-    cancelAtPeriodEnd: stripeSub?.cancel_at_period_end ?? subscription.cancelAtPeriodEnd ?? false,
+    cancelAtPeriodEnd: cancelAtPeriodEnd,
     canceled_at: stripeSub?.canceled_at ? new Date(stripeSub.canceled_at * 1000).toISOString() : null,
     
     // Billing period
@@ -53,6 +65,28 @@ export const formatSubscriptionResponse = (subscription, user, stripeSub, latest
     user_name: userName,
     user_email: user?.email || null,
     user_mobile: userMobile,
+    isSubscription: isServiceActive, // ✅ CURRENT SERVICE STATUS
+    
+    // ✅ CANCELLATION INFORMATION
+    isSubscriptionCancelled: isSubscriptionCancelled, // ✅ CANCELLATION REQUEST STATUS
+    cancellationInfo: {
+      isCancelled: isSubscriptionCancelled,
+      isServiceActive: isServiceActive, // ✅ SEPARATE SERVICE STATUS
+      canceledAt: canceledAt ? new Date(canceledAt).toISOString() : null,
+      cancelAtPeriodEnd: cancelAtPeriodEnd,
+      currentPeriodEnd: currentPeriodEnd ? new Date(currentPeriodEnd).toISOString() : null,
+      hasActivePeriod: hasActivePeriod,
+      daysRemaining: daysRemaining,
+      serviceEndDate: currentPeriodEnd ? new Date(currentPeriodEnd).toISOString() : null
+    },
+    
+    // User subscription timeline
+    userSubscriptionTimeline: {
+      subscriptionStartDate: user?.subscriptionStartDate ? new Date(user.subscriptionStartDate).toISOString() : null,
+      subscriptionEndDate: user?.subscriptionEndDate ? new Date(user.subscriptionEndDate).toISOString() : null,
+      subscriptionCanceledAt: user?.subscriptionCanceledAt ? new Date(user.subscriptionCanceledAt).toISOString() : null,
+      subscriptionActivatedAt: user?.subscriptionActivatedAt ? new Date(user.subscriptionActivatedAt).toISOString() : null
+    },
     
     // Invoice details - flattened
     invoice_id: latestInvoice?.id || subscription.latestInvoiceId || null,
@@ -89,5 +123,10 @@ export const formatSubscriptionResponse = (subscription, user, stripeSub, latest
     created: stripeSub?.created ? new Date(stripeSub.created * 1000).toISOString() : null,
     createdAt: subscription.createdAt ? new Date(subscription.createdAt).toISOString() : null,
     updatedAt: subscription.updatedAt ? new Date(subscription.updatedAt).toISOString() : null,
+    
+    // ✅ SUBSCRIPTION MODEL CANCELLATION FIELDS
+    subscriptionCanceledAt: subscription.canceledAt ? new Date(subscription.canceledAt).toISOString() : null,
+    subscriptionCurrentPeriodStart: subscription.currentPeriodStart ? new Date(subscription.currentPeriodStart).toISOString() : null,
+    subscriptionCurrentPeriodEnd: subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd).toISOString() : null
   };
 };

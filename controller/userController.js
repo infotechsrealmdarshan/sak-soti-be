@@ -10,6 +10,7 @@ import { verifyFirebaseToken } from "../config/firebase.js";
 import Post from "../models/Post.js";
 import { createStripeCustomer, validateStripeCustomer } from "../utils/stripeHelper.js";
 import { checkAndExpireSubscription } from "../utils/subscriptionCron.js";
+import logger from "../utils/logger.js";
 
 const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,}$/;
 
@@ -43,13 +44,13 @@ export const registerUser = asyncHandler(async (req, res) => {
     return successResponse(res, "User already exists", null, null, 200, 0);
   }
 
-  user = await User.create({ firstname, lastname, email, password, profileimg, fcmToken, country });
+  user = await User.create({ firstname, lastname, email, password, profileimg, fcmToken, country, isGoogle: false });
 
   // 🟢 Create Stripe customer and attach ID
   try {
     await createStripeCustomer(user);
   } catch (err) {
-    console.error("⚠️ Stripe customer creation failed at registration:", err.message);
+    logger.error("⚠️ Stripe customer creation failed at registration:", err.message);
   }
 
   const accessToken = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, {
@@ -60,14 +61,17 @@ export const registerUser = asyncHandler(async (req, res) => {
   try {
     await redisClient.setEx(`user:${user._id}`, 3600, JSON.stringify(user));
   } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
+
+  // Count user's posts
+  const postCount = await Post.countDocuments({ author: user._id, isDeleted: { $ne: true } });
 
   // Exclude password from response
   const userResponse = user.toObject();
   delete userResponse.password;
 
-  return successResponse(res, "Registration successful", { accessToken, user: userResponse }, null, 200, 1);
+  return successResponse(res, "Registration successful", { accessToken, user: userResponse, postCount }, null, 200, 1);
 });
 
 
@@ -99,18 +103,18 @@ export const loginUser = asyncHandler(async (req, res) => {
   }
 
   if (!process.env.JWT_SECRET) {
-    console.error("❌ JWT_SECRET is not configured in environment variables");
+    logger.error("❌ JWT_SECRET is not configured in environment variables");
     return errorResponse(res, "Server configuration error", 500);
   }
 
   try {
     const isValidCustomer = await validateStripeCustomer(user.stripeCustomerId);
     if (!isValidCustomer) {
-      console.log(`⚠️ Stripe customer invalid or missing for ${user.email}. Creating new...`);
+      logger.log(`⚠️ Stripe customer invalid or missing for ${user.email}. Creating new...`);
       await createStripeCustomer(user);
     }
   } catch (stripeError) {
-    console.error("❌ Stripe customer validation/creation failed:", stripeError.message);
+    logger.error("❌ Stripe customer validation/creation failed:", stripeError.message);
   }
 
   // Generate access and refresh tokens using helper functions
@@ -120,12 +124,24 @@ export const loginUser = asyncHandler(async (req, res) => {
 
   // Update push token if provided
   try {
-    if (fcmToken && fcmToken !== user.fcmToken) {
-      user.fcmToken = fcmToken;
-      await user.save();
+    if (fcmToken) {
+      // ✅ Check if this token is already used by ANOTHER user
+      const tokenConflictUser = await User.findOne({ fcmToken: fcmToken, _id: { $ne: user._id } });
+
+      if (tokenConflictUser) {
+        logger.log(`🔄 FCM token conflict detected. Removing token from user ${tokenConflictUser._id}`);
+        tokenConflictUser.fcmToken = null;
+        await tokenConflictUser.save();
+      }
+
+      // ✅ Update current user's token if it's different
+      if (user.fcmToken !== fcmToken) {
+        user.fcmToken = fcmToken;
+        await user.save();
+      }
     }
   } catch (saveErr) {
-    console.warn("⚠️ Failed to update fcmToken:", saveErr.message);
+    logger.warn("⚠️ Failed to update fcmToken:", saveErr.message);
   }
 
   // Store refresh token in Redis with matching TTL
@@ -136,8 +152,11 @@ export const loginUser = asyncHandler(async (req, res) => {
     await redisClient.setEx(`refreshToken:${user._id}`, refreshTokenExpirySeconds, refreshToken);
     await redisClient.setEx(`user:${user._id}`, 3600, JSON.stringify(user));
   } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
+
+  // Count user's posts
+  const postCount = await Post.countDocuments({ author: user._id, isDeleted: { $ne: true } });
 
   // Exclude password from response
   const userResponse = user.toObject();
@@ -146,7 +165,8 @@ export const loginUser = asyncHandler(async (req, res) => {
   // Success - return 200 with status 1 (user found and login successful)
   return successResponse(res, "Login successful", {
     accessToken,
-    user: userResponse
+    user: userResponse,
+    postCount
   }, null, 200, 1);
 });
 
@@ -170,20 +190,23 @@ export const getProfile = asyncHandler(async (req, res) => {
   delete userResponse.password;
   delete userResponse.firebaseToken;
 
+  // Count user's posts
+  const postCount = await Post.countDocuments({ author: userId, isDeleted: { $ne: true } });
+
   // Update cache
   try {
     await redisClient.setEx(`user:${userId}`, 3600, JSON.stringify(userResponse));
     if (expired) {
-      console.log(`✅ Cache updated after subscription expiration for user: ${user.email}`);
+      logger.log(`✅ Cache updated after subscription expiration for user: ${user.email}`);
     }
   } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
 
   return successResponse(
     res,
     expired ? "Subscription expired, updated profile" : "Profile retrieved",
-    { user: userResponse }
+    { user: userResponse, postCount }
   );
 });
 
@@ -223,12 +246,11 @@ export const updateProfile = asyncHandler(async (req, res) => {
   try {
     await redisClient.setEx(`user:${userId}`, 3600, JSON.stringify(userResponse));
   } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
 
   return successResponse(res, "Profile updated successfully", { user: userResponse });
 });
-
 
 
 export const forgotPassword = asyncHandler(async (req, res) => {
@@ -242,7 +264,7 @@ export const forgotPassword = asyncHandler(async (req, res) => {
   }
 
   if (!process.env.JWT_SECRET) {
-    console.error("❌ JWT_SECRET is not configured in environment variables");
+    logger.error("❌ JWT_SECRET is not configured in environment variables");
     return errorResponse(res, "Server configuration error", 500);
   }
 
@@ -289,7 +311,7 @@ export const resetPassword = asyncHandler(async (req, res) => {
   try {
     await redisClient.del(`user:${user._id}`);
   } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
 
   return successResponse(res, "Password changed successfully");
@@ -318,7 +340,7 @@ export const updateStatus = asyncHandler(async (req, res) => {
   try {
     await redisClient.setEx(`user:${userId}`, 3600, JSON.stringify(updatedUser));
   } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
   }
 
   return successResponse(res, "Status updated successfully", updatedUser);
@@ -331,72 +353,130 @@ export const updateStatus = asyncHandler(async (req, res) => {
 export const googleAuth = asyncHandler(async (req, res) => {
   const { idToken } = req.body;
 
-  const firebaseResult = await verifyFirebaseToken(idToken);
-  if (firebaseResult.error)
-    return successResponse(res, firebaseResult.message, null, null, 200, 0);
+  logger.log("🔐 Google Auth - ID Token received:", idToken ? `Present (length: ${idToken.length})` : "Missing");
 
-  const { email, name, picture } = firebaseResult;
-  if (!email) return successResponse(res, "Firebase token missing email", null, null, 200, 0);
+  if (!idToken) {
+    return errorResponse(res, "ID Token missing", 400);
+  }
 
-  let [firstname, ...rest] = name.split(" ");
-  const lastname = rest.join(" ");
+  // STEP 1: Verify Firebase ID Token
+  const result = await verifyFirebaseToken(idToken);
 
+  logger.log("🔐 Firebase verification result:", {
+    success: result.success,
+    error: result.error,
+    message: result.message,
+    email: result.email
+  });
+
+  if (result.error || !result.success) {
+    logger.error("❌ Firebase token verification failed:", result.message);
+    return errorResponse(res, result.message || "Invalid Firebase ID Token", 401);
+  }
+
+  const { email, name, picture, uid } = result; // ✅ Get uid from result
+
+  if (!email) {
+    logger.error("❌ Firebase token missing email");
+    return errorResponse(res, "Firebase token missing email", 400);
+  }
+
+  logger.log("✅ Firebase token verified for email:", email);
+
+  // Split name
+  let firstname = "";
+  let lastname = "";
+
+  if (name) {
+    const parts = name.trim().split(" ");
+    firstname = parts[0];
+    lastname = parts.slice(1).join(" ");
+  } else {
+    firstname = email.split("@")[0];
+  }
+
+  // STEP 2: Check or create user
   let user = await User.findOne({ email: email.toLowerCase() });
 
   if (!user) {
-    // Create new user with Google profile picture
+    logger.log("👤 Creating new user for email:", email);
+
+    // ✅ CREATE USER WITH firebaseToken TO BYPASS PASSWORD REQUIREMENT
     user = await User.create({
       firstname,
       lastname,
       email: email.toLowerCase(),
       profileimg: picture || "/uploads/default.png",
-      firebaseToken: idToken,
+      firebaseToken: uid,
+      isGoogle: true
     });
+    logger.log("✅ New Google auth user created:", user._id);
   } else {
-    // Update existing user - always save profile picture if provided from Google
-    if (picture) {
+    logger.log("👤 Existing user found:", user._id);
+    // Update profile picture if changed and set firebaseToken
+    if (picture && picture !== user.profileimg) {
       user.profileimg = picture;
     }
-    user.firebaseToken = idToken;
+    // ✅ Ensure firebaseToken is set for existing users
+    if (!user.firebaseToken) {
+      user.firebaseToken = uid;
+    }
+    if (!user.isGoogle) {
+      user.isGoogle = true;
+    }
     await user.save();
+    logger.log("🔄 Updated user profile image and firebaseToken");
   }
 
+  // STEP 3: Issue tokens
   const accessToken = authHelper.generateAccessToken(user);
   const refreshToken = authHelper.generateRefreshToken(user);
-  const refreshTokenExpiry = process.env.JWT_REFRESH_TOKEN_EXPIRY || "30d";
 
-  // Store refresh token in Redis with matching TTL
+  const refreshTokenExpiry = process.env.JWT_REFRESH_TOKEN_EXPIRY || "30d";
+  const refreshTokenExpiryMs = authHelper.parseExpiry(refreshTokenExpiry);
+  const refreshTokenExpirySeconds = Math.floor(refreshTokenExpiryMs / 1000);
+
+  // STEP 4: Save refresh token in Redis
   try {
-    const refreshTokenExpiryMs = authHelper.parseExpiry(refreshTokenExpiry);
-    const refreshTokenExpirySeconds = Math.floor(refreshTokenExpiryMs / 1000);
-    await redisClient.setEx(`refreshToken:${user._id}`, refreshTokenExpirySeconds, refreshToken);
-    await redisClient.setEx(`user:${user._id}`, 3600, JSON.stringify(user));
-  } catch (redisError) {
-    console.warn("⚠️ Redis cache failed (non-critical):", redisError.message);
+    await redisClient.setEx(
+      `refreshToken:${user._id}`,
+      refreshTokenExpirySeconds,
+      refreshToken
+    );
+    logger.log("✅ Refresh token stored in Redis");
+  } catch (err) {
+    logger.warn("⚠️ Redis save failed:", err.message);
   }
 
-  // Exclude password and firebaseToken from response
+  // STEP 5: Clean user response
   const userResponse = user.toObject();
   delete userResponse.password;
-  delete userResponse.firebaseToken;
+  delete userResponse.firebaseToken; // Remove sensitive data
 
-  return successResponse(res, "Google login successful", {
-    accessToken,
-    refreshToken,
-    user: userResponse
-  }, null, 200, 1);
+  logger.log("✅ Google authentication successful for user:", user.email);
+
+  return successResponse(
+    res,
+    "Google login successful",
+    {
+      accessToken,
+      user: userResponse,
+    },
+    null,
+    200,
+    1
+  );
 });
-
 
 export const refreshToken = asyncHandler(async (req, res) => {
   const { token } = req.body;
 
   if (!token) {
-    return successResponse(res, "Token is required", null, null, 400, 0);
+    return successResponse(res, "Token is required", null, null, 200, 0);
   }
 
   if (!process.env.JWT_SECRET) {
-    console.error("❌ JWT_SECRET is not configured in environment variables");
+    logger.error("❌ JWT_SECRET is not configured in environment variables");
     return errorResponse(res, "Server configuration error", 500);
   }
 
@@ -405,9 +485,9 @@ export const refreshToken = asyncHandler(async (req, res) => {
     decoded = jwt.verify(token, process.env.JWT_SECRET);
   } catch (error) {
     if (error.name === "TokenExpiredError") {
-      return successResponse(res, "Invalid or expired refresh token", null, null, 401, 0);
+      return successResponse(res, "Invalid or expired refresh token", null, null, 200, 0);
     }
-    return successResponse(res, "Invalid or expired refresh token", null, null, 401, 0);
+    return successResponse(res, "Invalid or expired refresh token", null, null, 200,);
   }
 
   // Verify refresh token exists in Redis (optional security check)
@@ -418,7 +498,7 @@ export const refreshToken = asyncHandler(async (req, res) => {
     }
   } catch (redisError) {
     // If Redis is unavailable, continue without validation (non-critical)
-    console.warn("⚠️ Redis verification failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis verification failed (non-critical):", redisError.message);
   }
 
   // Verify user still exists
@@ -448,13 +528,13 @@ export const logoutUser = asyncHandler(async (req, res) => {
     try {
       await User.findByIdAndUpdate(userId, { fcmToken: null });
     } catch (updateErr) {
-      console.warn("⚠️ Failed to clear fcmToken on logout:", updateErr.message);
+      logger.warn("⚠️ Failed to clear fcmToken on logout:", updateErr.message);
     }
     await redisClient.del(`refreshToken:${userId}`);
     await redisClient.del(`user:${userId}`);
     return successResponse(res, "Logout successful", null, null, 200, 1);
   } catch (redisError) {
-    console.warn("⚠️ Redis logout cleanup failed:", redisError.message);
+    logger.warn("⚠️ Redis logout cleanup failed:", redisError.message);
     return successResponse(res, "Logout successful (cache cleanup failed)", null, null, 200, 1);
   }
 });
@@ -529,9 +609,9 @@ export const bulkDeleteUsers = asyncHandler(async (req, res) => {
       redisClient.del(`refreshToken:${userId}`)
     );
     await Promise.all([...deletePromises, ...refreshDeletePromises]);
-    console.log(`🧹 Cleared Redis cache for ${nonAdminUserIds.length} users`);
+    logger.log(`🧹 Cleared Redis cache for ${nonAdminUserIds.length} users`);
   } catch (redisError) {
-    console.warn("⚠️ Redis cache cleanup failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cache cleanup failed (non-critical):", redisError.message);
   }
 
   // 📝 Response message
@@ -583,12 +663,12 @@ export const deleteMyAccount = asyncHandler(async (req, res) => {
   if (user.stripeCustomerId) {
     try {
       await stripe.customers.del(user.stripeCustomerId);
-      console.log(`✅ Stripe customer deleted: ${user.stripeCustomerId}`);
+      logger.log(`✅ Stripe customer deleted: ${user.stripeCustomerId}`);
     } catch (stripeError) {
-      console.error("⚠️ Failed to delete Stripe customer:", stripeError.message);
+      logger.error("⚠️ Failed to delete Stripe customer:", stripeError.message);
     }
   } else {
-    console.log(`ℹ️ No Stripe customer found for user ${user.email}`);
+    logger.log(`ℹ️ No Stripe customer found for user ${user.email}`);
   }
 
   // Soft delete user
@@ -607,7 +687,7 @@ export const deleteMyAccount = asyncHandler(async (req, res) => {
     await redisClient.del(`user:${userId}`);
     await redisClient.del(`refreshToken:${userId}`);
   } catch (redisError) {
-    console.warn("⚠️ Redis cleanup failed (non-critical):", redisError.message);
+    logger.warn("⚠️ Redis cleanup failed (non-critical):", redisError.message);
   }
 
   return successResponse(res, "Account deleted successfully", null, null, 200, 1);

@@ -9,7 +9,8 @@ import {
   cancelSubscription,
   getSubscriptionById,
   selectPlan,
-  getPaymentMethodFromIntent,
+  verifyCheckoutSession,
+  getUserTransactionsAdmin,
 } from "../controller/stripeController.js";
 import { adminOnly } from "../middlewares/role.js";
 
@@ -77,7 +78,8 @@ router.post("/select-plan", auth, selectPlan);
  * /api/subscription/success-payment:
  *   post:
  *     tags: [Subscription]
- *     summary: Get payment method details from payment intent ID
+ *     summary: Verify payment intent and activate subscription (Flutter only)
+ *     description: For Flutter direct payments using Payment Intent
  *     security:
  *       - bearerAuth: []
  *     requestBody:
@@ -91,19 +93,19 @@ router.post("/select-plan", auth, selectPlan);
  *             properties:
  *               paymentIntentId:
  *                 type: string
- *                 description: Payment Intent ID
+ *                 description: Payment Intent ID from Flutter Stripe SDK
  *                 example: pi_3MtwBwLkdIwHu7ix28a3tqPa
  *     responses:
  *       200:
- *         description: Payment method details retrieved successfully
+ *         description: Subscription activated successfully
  *       400:
- *         description: Bad request - missing paymentIntentId
+ *         description: Bad request - missing paymentIntentId or payment not completed
  *       404:
- *         description: Payment intent not found or no payment method
+ *         description: Payment intent not found or no subscription
  *       500:
  *         description: Internal server error
  */
-router.post("/success-payment", auth, getPaymentMethodFromIntent);
+router.post("/success-payment", auth, verifyCheckoutSession);
 
 /**
  * @swagger
@@ -136,20 +138,13 @@ router.post(
  * /api/subscription/list:
  *   get:
  *     tags: [Subscription]
- *     summary: Get current or all user subscriptions
+ *     summary: Get user's current subscription with transaction history
+ *     description: Returns current active subscription (or null), complete transaction history, and user data in a single unified response
  *     security:
  *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: type
- *         schema:
- *           type: string
- *           enum: [current, all]
- *         required: true
- *         description: Use `current` for only active subscription, or `all` for full history.
  *     responses:
  *       200:
- *         description: Subscriptions fetched successfully
+ *         description: Subscription data fetched successfully
  */
 router.get("/list", auth, getUserSubscriptions);
 
@@ -159,13 +154,44 @@ router.get("/list", auth, getUserSubscriptions);
  *   get:
  *     tags: [Subscription]
  *     summary: Get all subscriptions (admin)
+ *     description: Get paginated list of all subscriptions with search and sorting
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: perPage
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 10
+ *         description: Number of items per page
+ *       - in: query
+ *         name: search
+ *         schema:
+ *           type: string
+ *         description: Search across subscription ID, customer ID, plan type, status, user name, or email
+ *       - in: query
+ *         name: sort
+ *         schema:
+ *           type: string
+ *           enum: [asc, desc]
+ *           default: desc
+ *         description: Sort order by creation date
  *     responses:
  *       200:
  *         description: Subscriptions fetched successfully
  *       403:
  *         description: Admin access required
+ *       500:
+ *         description: Internal server error
  */
 router.get("/admin/list", auth, adminOnly, getAllSubscriptionsAdmin);
 
@@ -216,5 +242,42 @@ router.get("/admin/:subscriptionId", auth, adminOnly, getSubscriptionById);
  *         description: Error canceling subscription
  */
 router.delete("/cancel", auth, cancelSubscription);
+
+/**
+ * @swagger
+ * /api/subscription/admin/user/{userId}/transactions:
+ *   get:
+ *     tags: [Subscription]
+ *     summary: Get all transactions for a specific user (Admin only)
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: userId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: User ID to fetch transactions for
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of transactions per page
+ *     responses:
+ *       200:
+ *         description: User transactions fetched successfully
+ *       403:
+ *         description: Admin access required
+ *       404:
+ *         description: User not found
+ */
+router.get("/admin/user/:userId/transactions", auth, adminOnly, getUserTransactionsAdmin);
 
 export default router;

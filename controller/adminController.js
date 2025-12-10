@@ -1,10 +1,11 @@
 import User from "../models/User.js";
 import redisClient from "../config/redis.js";
 import { asyncHandler } from "../utils/errorHandler.js";
-import { successResponse } from "../utils/response.js";
+import { errorResponse, successResponse } from "../utils/response.js";
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import Post from "../models/Post.js";
+import logger from "../utils/logger.js";
 
 // Helper: clear cached users
 export const clearUserCache = async () => {
@@ -18,11 +19,11 @@ export const clearUserCache = async () => {
       cursor = nextCursor;
       if (keys.length > 0) {
         await redisClient.del(...keys); // ✅ spread keys
-        console.log(`🧹 Cleared ${keys.length} user cache entries`);
+        logger.log(`🧹 Cleared ${keys.length} user cache entries`);
       }
     } while (cursor !== "0");
   } catch (err) {
-    console.warn("⚠️ Redis cache clear failed:", err.message);
+    logger.warn("⚠️ Redis cache clear failed:", err.message);
   }
 };
 
@@ -32,6 +33,7 @@ export const getAllUsers = asyncHandler(async (req, res) => {
     page = 1,
     limit,
     search = "",
+    status = "all",
     orderBy = "createdAt",
     order = "desc",
   } = req.query;
@@ -39,47 +41,70 @@ export const getAllUsers = asyncHandler(async (req, res) => {
   page = parseInt(page);
   limit = limit ? parseInt(limit) : 0;
 
-  const query = search
-    ? {
-        $or: [
-          { firstname: { $regex: search, $options: "i" } },
-          { lastname: { $regex: search, $options: "i" } },
-          { email: { $regex: search, $options: "i" } },
-        ],
-      }
-    : {};
+  // Build the base query
+  let query = {};
+
+  // Add search condition if provided
+  if (search) {
+    query.$or = [
+      { firstname: { $regex: search, $options: "i" } },
+      { lastname: { $regex: search, $options: "i" } },
+      { email: { $regex: search, $options: "i" } },
+    ];
+  }
+
+  // Add status filter based on your user model fields
+  switch (status) {
+    case "active":
+      query.status = "active";
+      query.isDeleted = false;
+      break;
+
+    case "inactive":
+      query.status = "inactive";
+      query.isDeleted = false;
+      break;
+
+    case "deleted":
+      query.isDeleted = true;
+      break;
+
+    case "all":
+    default:
+      break;
+  }
 
   const sortOrder = order === "asc" ? 1 : -1;
   const sortOptions = { [orderBy]: sortOrder };
   const skip = (page - 1) * (limit || 0);
 
-  const cacheKey = `users:page=${page}&limit=${limit}&search=${search}&orderBy=${orderBy}&order=${order}`;
+  const cacheKey = `users:page=${page}&limit=${limit}&search=${search}&status=${status}&orderBy=${orderBy}&order=${order}`;
 
   let cachedData = null;
   try {
     const cacheValue = await redisClient.get(cacheKey);
     if (cacheValue) cachedData = JSON.parse(cacheValue);
   } catch (err) {
-    console.warn("⚠️ Redis read failed:", err.message);
+    logger.warn("⚠️ Redis read failed:", err.message);
   }
 
   let lastUpdateTime;
   try {
     lastUpdateTime = await redisClient.get("users:lastUpdateTime");
   } catch (err) {
-    console.warn("⚠️ Redis timestamp read failed:", err.message);
+    logger.warn("⚠️ Redis timestamp read failed:", err.message);
   }
 
   if (cachedData && lastUpdateTime) {
     const diff = Date.now() - parseInt(lastUpdateTime);
-    if (diff < 3000) { 
-      console.log("📦 Served users from Redis cache (fresh)");
+    if (diff < 3000) {
+      logger.log("📦 Served users from Redis cache (fresh)");
       return successResponse(res, "Users retrieved successfully (from cache)", cachedData);
     }
   }
 
   // 🚀 3️⃣ Otherwise fetch immediately from MongoDB
-  console.log("Fetching fresh users from MongoDB...");
+  logger.log("Fetching fresh users from MongoDB...");
 
   const totalUsers = await User.countDocuments(query);
   const usersQuery = User.find(query).sort(sortOptions).skip(skip).select("-password");
@@ -88,6 +113,13 @@ export const getAllUsers = asyncHandler(async (req, res) => {
 
   const users = await usersQuery.exec();
 
+  // Format the response to include user status information
+  const formattedUsers = users.map(user => ({
+    ...user.toObject(),
+    // Ensure consistent status field in response
+    currentStatus: user.isDeleted ? 'deleted' : user.status
+  }));
+
   const pagination = {
     currentPage: page,
     totalPages: limit > 0 ? Math.ceil(totalUsers / limit) : 1,
@@ -95,7 +127,14 @@ export const getAllUsers = asyncHandler(async (req, res) => {
     itemsPerPage: limit || totalUsers,
   };
 
-  const responseData = { users, pagination };
+  const responseData = {
+    users: formattedUsers,
+    pagination,
+    filters: {
+      appliedStatus: status,
+      search: search || null
+    }
+  };
 
   // 🧠 4️⃣ Store fresh data and timestamp in Redis
   try {
@@ -103,14 +142,13 @@ export const getAllUsers = asyncHandler(async (req, res) => {
       redisClient.setEx(cacheKey, 300, JSON.stringify(responseData)), // cache for 5 min
       redisClient.set("users:lastUpdateTime", Date.now().toString())   // track freshness
     ]);
-    console.log("💾 Cached users in Redis (fresh data)");
+    logger.log("💾 Cached users in Redis (fresh data)");
   } catch (err) {
-    console.warn("⚠️ Redis write failed:", err.message);
+    logger.warn("⚠️ Redis write failed:", err.message);
   }
 
   return successResponse(res, "Users retrieved successfully", responseData);
 });
-
 
 // 📦 GET USER BY ID
 export const getUserById = asyncHandler(async (req, res) => {
@@ -124,11 +162,11 @@ export const getUserById = asyncHandler(async (req, res) => {
   try {
     const cachedUser = await redisClient.get(cacheKey);
     if (cachedUser) {
-      console.log("📦 Served user from Redis cache");
+      logger.log("📦 Served user from Redis cache");
       return successResponse(res, "User retrieved successfully (from cache)", JSON.parse(cachedUser));
     }
   } catch (err) {
-    console.warn("⚠️ Redis read failed:", err.message);
+    logger.warn("⚠️ Redis read failed:", err.message);
   }
 
   const user = await User.findById(id).select("-password");
@@ -139,7 +177,7 @@ export const getUserById = asyncHandler(async (req, res) => {
   try {
     await redisClient.setEx(cacheKey, 300, JSON.stringify(user));
   } catch (err) {
-    console.warn("⚠️ Redis write failed:", err.message);
+    logger.warn("⚠️ Redis write failed:", err.message);
   }
 
   return successResponse(res, "User retrieved successfully", user);
@@ -148,7 +186,7 @@ export const getUserById = asyncHandler(async (req, res) => {
 // ➕ CREATE USER
 export const createUser = asyncHandler(async (req, res) => {
   const { firstname, lastname, email, password, isAdmin } = req.body;
-  if (!firstname || !lastname || !email || !password)
+  if (!firstname || !email || !password)
     return successResponse(res, "All fields are required", null, null, 200, 0);
 
   const existingUser = await User.findOne({ email });
@@ -255,7 +293,7 @@ export const deleteUser = asyncHandler(async (req, res) => {
     await redisClient.del(`refreshToken:${id}`);
     await clearUserCache();
   } catch (redisError) {
-    console.warn("⚠️ Redis cache cleanup failed:", redisError.message);
+    logger.warn("⚠️ Redis cache cleanup failed:", redisError.message);
   }
 
   return successResponse(res, "User soft-deleted successfully", null, null, 200, 1);
